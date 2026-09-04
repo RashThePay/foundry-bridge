@@ -58,28 +58,53 @@
         flex-direction: column;
         gap: 0.5rem;
       }
-      #log {
-        font-family: ui-monospace, Consolas, monospace;
-        font-size: 0.8rem;
-        height: 40vh;
+      #chatFeed, #log {
+        font-family: system-ui, sans-serif;
+        font-size: 0.85rem;
+        height: 22vh;
         overflow: auto;
-        white-space: pre-wrap;
         background: #0f0c09;
         border-radius: 0.75rem;
         padding: 0.75rem;
         border: 1px solid #5a4634;
       }
+      #log {
+        font-family: ui-monospace, Consolas, monospace;
+        font-size: 0.75rem;
+        height: 18vh;
+        white-space: pre-wrap;
+      }
+      .chat-line { margin: 0 0 0.35rem; line-height: 1.35; }
+      .chat-line .who { color: var(--accent); font-weight: 600; }
+      .chat-line.from-foundry .who { color: var(--ok); }
       .status { font-family: system-ui, sans-serif; font-size: 0.85rem; }
       .status.ok { color: var(--ok); }
       .status.bad { color: var(--bad); }
       .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem; }
+      #tokenList {
+        font-family: system-ui, sans-serif;
+        font-size: 0.8rem;
+        display: grid;
+        gap: 0.35rem;
+      }
+      .token-row {
+        display: grid;
+        grid-template-columns: 1.4fr 1fr 0.8fr;
+        gap: 0.5rem;
+        padding: 0.4rem 0.55rem;
+        border-radius: 0.5rem;
+        background: #0f0c09;
+        border: 1px solid #5a4634;
+      }
+      .token-row.flash { border-color: var(--ok); }
+      #sceneLabel { font-family: system-ui, sans-serif; color: var(--accent); font-size: 0.9rem; }
       @media (max-width: 600px) { .grid2 { grid-template-columns: 1fr; } }
     </style>
   </head>
   <body>
     <header>
       <h1>LPC Bridge test client</h1>
-      <p class="sub">Talks to Foundry through the local WebSocket relay — not the Foundry client.</p>
+      <p class="sub">Bidirectional: player actions → Foundry, DM changes → this client live.</p>
     </header>
 
     <section class="panel">
@@ -92,21 +117,28 @@
         <button id="disconnectBtn" class="secondary" type="button">Disconnect</button>
       </div>
       <div id="status" class="status bad">Disconnected</div>
+      <div id="sceneLabel">Scene: —</div>
     </section>
 
     <section class="panel">
-      <label>Chat → Foundry</label>
+      <label>Live tokens (from Foundry)</label>
+      <div id="tokenList"><div class="sub">Waiting for state…</div></div>
+    </section>
+
+    <section class="panel">
+      <label>Chat (both directions)</label>
+      <div id="chatFeed"></div>
       <div class="row">
-        <input id="chatText" placeholder="Hello from the phone client…" />
-        <button id="chatBtn" type="button">Send chat</button>
+        <input id="chatText" placeholder="Message Foundry…" />
+        <button id="chatBtn" type="button">Send</button>
       </div>
     </section>
 
     <section class="panel">
-      <label>Move token on current Foundry scene</label>
+      <label>Move token</label>
       <div class="row">
         <select id="tokenSelect"><option value="">(first / controlled token)</option></select>
-        <button id="refreshTokens" class="secondary" type="button">Refresh list</button>
+        <button id="refreshTokens" class="secondary" type="button">Refresh</button>
       </div>
       <div class="grid2">
         <div class="row"><label>X</label><input id="moveX" type="number" value="200" /></div>
@@ -131,8 +163,8 @@
       <button id="intentBtn" type="button">Send intent</button>
     </section>
 
-    <section class="panel" style="flex: 1">
-      <label>Log</label>
+    <section class="panel">
+      <label>Debug log</label>
       <div id="log"></div>
     </section>
 
@@ -143,6 +175,7 @@
 
       let ws = null
       let tokens = []
+      const seenChat = new Set()
 
       function log(line, obj) {
         const el = $('log')
@@ -157,18 +190,67 @@
         el.textContent = text
       }
 
-      function fillTokens(list) {
+      function addChat(msg) {
+        if (msg.source === 'foundry-confirm') return
+        const key = msg.messageId || `${msg.source}|${msg.speaker}|${msg.text}`
+        if (seenChat.has(key)) return
+        seenChat.add(key)
+        if (seenChat.size > 200) {
+          const first = seenChat.values().next().value
+          seenChat.delete(first)
+        }
+
+        const feed = $('chatFeed')
+        const line = document.createElement('div')
+        line.className = 'chat-line' + (msg.source === 'foundry' ? ' from-foundry' : '')
+        const who = document.createElement('span')
+        who.className = 'who'
+        who.textContent = msg.speaker || '??'
+        line.appendChild(who)
+        line.appendChild(document.createTextNode(' · ' + (msg.text || '')))
+        feed.appendChild(line)
+        feed.scrollTop = feed.scrollHeight
+      }
+
+      function fillTokens(list, scene) {
+        const prev = Object.fromEntries(tokens.map((t) => [t.id, t]))
         tokens = list || []
+        $('sceneLabel').textContent = 'Scene: ' + (scene || '—')
+
         const sel = $('tokenSelect')
-        const prev = sel.value
+        const selected = sel.value
         sel.innerHTML = '<option value="">(first / controlled token)</option>'
         for (const t of tokens) {
           const opt = document.createElement('option')
           opt.value = t.id
-          opt.textContent = `${t.name} (${t.x}, ${t.y})`
+          opt.textContent = `${t.name} (${Math.round(t.x)}, ${Math.round(t.y)})`
           sel.appendChild(opt)
         }
-        if (prev) sel.value = prev
+        if (selected) sel.value = selected
+
+        const box = $('tokenList')
+        if (!tokens.length) {
+          box.innerHTML = '<div class="sub">No tokens on scene</div>'
+          return
+        }
+        box.innerHTML = ''
+        for (const t of tokens) {
+          const row = document.createElement('div')
+          row.className = 'token-row'
+          const old = prev[t.id]
+          if (old && (old.x !== t.x || old.y !== t.y || old.hp !== t.hp)) row.classList.add('flash')
+          const hp =
+            t.hp != null && t.maxHp != null ? `HP ${t.hp}/${t.maxHp}` : t.hp != null ? `HP ${t.hp}` : '—'
+          row.innerHTML = `<span>${escapeHtml(t.name)}</span><span>(${Math.round(t.x)}, ${Math.round(t.y)})</span><span>${hp}</span>`
+          box.appendChild(row)
+        }
+      }
+
+      function escapeHtml(s) {
+        return String(s)
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
       }
 
       function connect() {
@@ -187,14 +269,19 @@
         ws.onmessage = (ev) => {
           let msg
           try { msg = JSON.parse(ev.data) } catch { log('bad frame', ev.data); return }
-          log('← ' + msg.type, msg)
+          if (msg.type !== 'state') log('← ' + msg.type, msg)
+          else log('← state', { scene: msg.scene, tokens: (msg.tokens || []).length, at: msg.at })
+
           if (msg.type === 'hello-ok') {
             setStatus(msg.foundryConnected, msg.foundryConnected ? 'Online (Foundry connected)' : 'Online (waiting for Foundry)')
+            if (msg.foundryConnected) send({ type: 'request-state' })
           }
           if (msg.type === 'info') {
             setStatus(!!msg.foundryConnected || $('status').classList.contains('ok'), msg.message || JSON.stringify(msg))
+            if (msg.foundryConnected) send({ type: 'request-state' })
           }
-          if (msg.type === 'state') fillTokens(msg.tokens)
+          if (msg.type === 'state') fillTokens(msg.tokens, msg.scene)
+          if (msg.type === 'chat') addChat(msg)
         }
       }
 
@@ -204,7 +291,7 @@
           return
         }
         ws.send(JSON.stringify(payload))
-        log('→ ' + payload.type, payload)
+        if (payload.type !== 'request-state') log('→ ' + payload.type, payload)
       }
 
       $('connectBtn').onclick = connect
@@ -234,9 +321,8 @@
           text: $('intentText').value.trim(),
         })
       }
-      $('refreshTokens').onclick = () => send({ type: 'ping' })
+      $('refreshTokens').onclick = () => send({ type: 'request-state' })
 
-      // Auto-connect for convenience
       connect()
     </script>
   </body>

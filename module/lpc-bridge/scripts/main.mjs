@@ -2,13 +2,16 @@ const MODULE_ID = 'lpc-bridge'
 
 /**
  * Foundry side of the spike.
- * Opens a WebSocket to the local bridge and applies player chat / moves / intents.
+ * Player → Foundry: chat / move / intent
+ * Foundry → players: live token state, scene, public chat, HP snapshots
  */
 class LpcBridge {
   constructor() {
     this.ws = null
     this.reconnectTimer = null
     this.manualClose = false
+    this.stateTimer = null
+    this.suppressChatEcho = false
   }
 
   get url() {
@@ -47,7 +50,7 @@ class LpcBridge {
       console.log(`${MODULE_ID} | Connected`)
       ui.notifications?.info('LPC Bridge connected')
       this.send({ type: 'hello', role: 'foundry', name: game.user.name })
-      this.pushState()
+      this.schedulePushState(true)
     })
 
     this.ws.addEventListener('message', (ev) => this.onMessage(ev.data))
@@ -68,6 +71,10 @@ class LpcBridge {
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer)
       this.reconnectTimer = null
+    }
+    if (this.stateTimer) {
+      clearTimeout(this.stateTimer)
+      this.stateTimer = null
     }
     if (this.ws) {
       try {
@@ -93,6 +100,23 @@ class LpcBridge {
     }
   }
 
+  /** Debounce rapid Foundry updates (token drag fires many times). */
+  schedulePushState(immediate = false) {
+    if (immediate) {
+      if (this.stateTimer) {
+        clearTimeout(this.stateTimer)
+        this.stateTimer = null
+      }
+      this.pushState()
+      return
+    }
+    if (this.stateTimer) return
+    this.stateTimer = setTimeout(() => {
+      this.stateTimer = null
+      this.pushState()
+    }, 80)
+  }
+
   async onMessage(raw) {
     let msg
     try {
@@ -109,6 +133,7 @@ class LpcBridge {
         return
       case 'player-join':
         ui.notifications?.info(`LPC player joined: ${msg.name}`)
+        this.schedulePushState(true)
         return
       case 'player-leave':
         ui.notifications?.warn(`LPC player left: ${msg.name}`)
@@ -123,6 +148,8 @@ class LpcBridge {
         await this.handleIntent(msg)
         return
       case 'ping':
+      case 'request-state':
+        this.schedulePushState(true)
         this.send({ type: 'pong' })
         return
       default:
@@ -135,12 +162,24 @@ class LpcBridge {
     if (!text) return
     const speakerName = String(msg.speaker || msg.player || 'Player').slice(0, 60)
 
-    await ChatMessage.create({
-      content: text,
-      speaker: { alias: `[LPC] ${speakerName}` },
-      type: CONST.CHAT_MESSAGE_STYLES?.OTHER ?? CONST.CHAT_MESSAGE_TYPES?.OTHER ?? 0,
-    })
+    this.suppressChatEcho = true
+    try {
+      await ChatMessage.create({
+        content: text,
+        speaker: { alias: `[LPC] ${speakerName}` },
+        type: CONST.CHAT_MESSAGE_STYLES?.OTHER ?? CONST.CHAT_MESSAGE_TYPES?.OTHER ?? 0,
+        flags: {
+          [MODULE_ID]: { fromClient: true, speaker: speakerName },
+        },
+      })
+    } finally {
+      // Allow the createChatMessage hook to see the flag; clear on next tick.
+      setTimeout(() => {
+        this.suppressChatEcho = false
+      }, 0)
+    }
 
+    // Client already got a local echo from the bridge; Foundry confirm is optional.
     this.send({
       type: 'chat',
       text,
@@ -157,7 +196,7 @@ class LpcBridge {
       return
     }
 
-    const token = this.findToken(msg.tokenId, msg.tokenName)
+    const token = this.findToken(msg.tokenId, msg.tokenName, msg.player)
     if (!token) {
       this.send({
         type: 'error',
@@ -168,8 +207,7 @@ class LpcBridge {
     }
 
     await token.document.update({ x, y })
-    ui.notifications?.info(`LPC Bridge: moved ${token.name} → (${x}, ${y})`)
-    this.pushState()
+    // updateToken hook will push state to all clients
     this.send({
       type: 'ack',
       for: 'move',
@@ -190,37 +228,49 @@ class LpcBridge {
       content: `<div class="lpc-intent"><strong>${foundry.utils.escapeHTML(player)}</strong> wants to <em>${foundry.utils.escapeHTML(verb)}</em> <strong>${foundry.utils.escapeHTML(target)}</strong>${text ? `: ${foundry.utils.escapeHTML(text)}` : ''}</div>`,
       speaker: { alias: 'LPC Intent' },
       whisper: ChatMessage.getWhisperRecipients('GM').map((u) => u.id),
+      flags: {
+        [MODULE_ID]: { fromClient: true, intent: true },
+      },
     })
 
     ui.notifications?.info(`LPC intent from ${player}: ${verb} ${target}`)
     this.send({ type: 'ack', for: 'intent' })
   }
 
-  findToken(tokenId, tokenName) {
+  findToken(tokenId, tokenName, playerName) {
     const tokens = canvas?.tokens?.placeables || []
     if (tokenId) {
       const byId = tokens.find((t) => t.id === tokenId || t.document?.id === tokenId)
       if (byId) return byId
     }
-    if (tokenName) {
-      const needle = String(tokenName).toLowerCase()
+    const nameCandidates = [tokenName, playerName].filter(Boolean).map((n) => String(n).toLowerCase())
+    for (const needle of nameCandidates) {
       const byName = tokens.find((t) => t.name?.toLowerCase() === needle)
       if (byName) return byName
     }
-    // Fallback: controlled token, else first owned/player token, else first token
     const controlled = canvas?.tokens?.controlled?.[0]
     if (controlled) return controlled
     return tokens[0] || null
   }
 
-  pushState() {
-    const tokens = (canvas?.tokens?.placeables || []).map((t) => ({
+  tokenPayload(t) {
+    const actor = t.actor
+    const hp = actor?.system?.attributes?.hp
+    return {
       id: t.id,
       name: t.name,
       x: t.document.x,
       y: t.document.y,
-      actorId: t.actor?.id || null,
-    }))
+      actorId: actor?.id || null,
+      hp: hp?.value ?? null,
+      maxHp: hp?.max ?? null,
+      hidden: !!t.document.hidden,
+      disposition: t.document.disposition,
+    }
+  }
+
+  pushState() {
+    const tokens = (canvas?.tokens?.placeables || []).map((t) => this.tokenPayload(t))
 
     this.send({
       type: 'state',
@@ -228,7 +278,38 @@ class LpcBridge {
       sceneId: canvas?.scene?.id || null,
       tokens,
       foundryConnected: true,
+      at: Date.now(),
     })
+  }
+
+  /** Forward Foundry-originated public chat to external clients. */
+  forwardFoundryChat(message) {
+    if (!message) return
+    if (message.getFlag?.(MODULE_ID, 'fromClient')) return
+    if (message.whisper?.length) return // keep GM whispers private
+
+    const speaker =
+      message.speaker?.alias ||
+      game.actors?.get(message.speaker?.actor)?.name ||
+      game.users?.get(message.author?.id || message.user)?.name ||
+      'Foundry'
+
+    const text = this.plainText(message.content || '')
+    if (!text) return
+
+    this.send({
+      type: 'chat',
+      text,
+      speaker,
+      source: 'foundry',
+      messageId: message.id,
+    })
+  }
+
+  plainText(html) {
+    const tmp = document.createElement('div')
+    tmp.innerHTML = html
+    return (tmp.textContent || tmp.innerText || '').replace(/\s+/g, ' ').trim()
   }
 }
 
@@ -264,9 +345,7 @@ Hooks.once('init', () => {
 Hooks.once('ready', () => {
   if (!game.user.isGM) return
 
-  // Sidebar button to reconnect / push state
   Hooks.on('getSceneControlButtons', (controls) => {
-    // Foundry v13 may use object or array — support both lightly
     const tokenControls = Array.isArray(controls)
       ? controls.find((c) => c.name === 'token')
       : controls.tokens
@@ -287,8 +366,17 @@ Hooks.once('ready', () => {
   })
 
   bridge.connect()
-  Hooks.on('canvasReady', () => bridge.pushState())
-  Hooks.on('updateToken', () => bridge.pushState())
+
+  // --- Foundry → clients ---
+  Hooks.on('canvasReady', () => bridge.schedulePushState(true))
+  Hooks.on('createToken', () => bridge.schedulePushState(true))
+  Hooks.on('deleteToken', () => bridge.schedulePushState(true))
+  Hooks.on('updateToken', () => bridge.schedulePushState(false))
+  Hooks.on('updateActor', () => bridge.schedulePushState(false))
+
+  Hooks.on('createChatMessage', (message) => {
+    bridge.forwardFoundryChat(message)
+  })
 })
 
 window.lpcBridge = bridge

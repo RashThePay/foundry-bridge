@@ -44,6 +44,13 @@ In the browser test client:
 3. Set X/Y and **Move token** → token jumps on the current scene
 4. **Send intent** → GM whisper with the proposed action
 
+**Foundry → client (live):**
+
+1. Drag a token in Foundry → client token list updates (x/y flash)
+2. Type in Foundry public chat → appears in the client chat feed
+3. Change actor HP → client shows updated HP
+4. Change scene → client scene label + token list refresh
+
 Token tools also get a plug button: reconnect + push token list to clients.
 
 ## Protocol (JSON)
@@ -54,7 +61,9 @@ Token tools also get a plug button: reconnect + push token list to clients.
 | `chat` | player | `{ text }` → Foundry `ChatMessage` |
 | `move` | player | `{ tokenId?, tokenName?, x, y }` → `TokenDocument#update` |
 | `intent` | player | `{ verb, target?, text? }` → GM whisper |
-| `state` | foundry | scene + token list for the client |
+| `state` | foundry | scene + tokens (x/y/hp) pushed on DM changes |
+| `chat` (source=`foundry`) | foundry | public Foundry chat → clients |
+| `request-state` | player | ask Foundry to re-push `state` |
 
 ## Next (not in spike)
 

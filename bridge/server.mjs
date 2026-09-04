@@ -134,10 +134,16 @@ wss.on('connection', (ws) => {
       }
 
       const forward = { ...msg, player: name, from: 'player' }
-      if (msg.type === 'chat' || msg.type === 'move' || msg.type === 'intent' || msg.type === 'ping') {
+      if (
+        msg.type === 'chat' ||
+        msg.type === 'move' ||
+        msg.type === 'intent' ||
+        msg.type === 'ping' ||
+        msg.type === 'request-state'
+      ) {
         send(foundrySocket, forward)
         send(ws, { type: 'ack', for: msg.type })
-        // Echo chat to other players immediately for snappy UX; Foundry will also confirm.
+        // Echo chat to other players immediately for snappy UX; Foundry confirm is skipped client-side.
         if (msg.type === 'chat') {
           broadcastPlayers({
             type: 'chat',
