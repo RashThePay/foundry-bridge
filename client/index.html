@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>LPC Bridge — test client</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #1a1510;
+        --panel: #2a2118;
+        --ink: #f0e0c0;
+        --accent: #c4a574;
+        --muted: #a89070;
+        --ok: #8ecf9a;
+        --bad: #e07060;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        min-height: 100dvh;
+        font-family: Georgia, "Times New Roman", serif;
+        background: radial-gradient(ellipse at top, #3d2a1a 0%, var(--bg) 55%, #0f0c09 100%);
+        color: var(--ink);
+        display: flex;
+        flex-direction: column;
+        padding: 1rem;
+        gap: 0.75rem;
+      }
+      h1 { margin: 0; font-size: 1.5rem; font-weight: normal; letter-spacing: 0.02em; }
+      .sub { color: var(--muted); font-size: 0.85rem; margin: 0; font-family: system-ui, sans-serif; }
+      .row { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; }
+      label { font-family: system-ui, sans-serif; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+      input, select, button, textarea {
+        font: inherit;
+        border-radius: 0.5rem;
+        border: 1px solid #5a4634;
+        background: #0f0c09;
+        color: var(--ink);
+        padding: 0.55rem 0.75rem;
+      }
+      input, select, textarea { flex: 1; min-width: 8rem; }
+      button {
+        background: var(--accent);
+        color: #1a1510;
+        border: none;
+        font-family: system-ui, sans-serif;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      button.secondary { background: transparent; color: var(--accent); border: 1px solid #5a4634; }
+      .panel {
+        background: color-mix(in srgb, var(--panel) 92%, transparent);
+        border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+        border-radius: 1rem;
+        padding: 0.85rem;
+        display: flex;
+        flex-direction: column;
+        gap: 0.5rem;
+      }
+      #log {
+        font-family: ui-monospace, Consolas, monospace;
+        font-size: 0.8rem;
+        height: 40vh;
+        overflow: auto;
+        white-space: pre-wrap;
+        background: #0f0c09;
+        border-radius: 0.75rem;
+        padding: 0.75rem;
+        border: 1px solid #5a4634;
+      }
+      .status { font-family: system-ui, sans-serif; font-size: 0.85rem; }
+      .status.ok { color: var(--ok); }
+      .status.bad { color: var(--bad); }
+      .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem; }
+      @media (max-width: 600px) { .grid2 { grid-template-columns: 1fr; } }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>LPC Bridge test client</h1>
+      <p class="sub">Talks to Foundry through the local WebSocket relay — not the Foundry client.</p>
+    </header>
+
+    <section class="panel">
+      <div class="row">
+        <label>WS URL</label>
+        <input id="url" value="" />
+        <label>Name</label>
+        <input id="name" value="Hero" style="flex: 0.5" />
+        <button id="connectBtn" type="button">Connect</button>
+        <button id="disconnectBtn" class="secondary" type="button">Disconnect</button>
+      </div>
+      <div id="status" class="status bad">Disconnected</div>
+    </section>
+
+    <section class="panel">
+      <label>Chat → Foundry</label>
+      <div class="row">
+        <input id="chatText" placeholder="Hello from the phone client…" />
+        <button id="chatBtn" type="button">Send chat</button>
+      </div>
+    </section>
+
+    <section class="panel">
+      <label>Move token on current Foundry scene</label>
+      <div class="row">
+        <select id="tokenSelect"><option value="">(first / controlled token)</option></select>
+        <button id="refreshTokens" class="secondary" type="button">Refresh list</button>
+      </div>
+      <div class="grid2">
+        <div class="row"><label>X</label><input id="moveX" type="number" value="200" /></div>
+        <div class="row"><label>Y</label><input id="moveY" type="number" value="200" /></div>
+      </div>
+      <button id="moveBtn" type="button">Move token</button>
+    </section>
+
+    <section class="panel">
+      <label>Intent → DM whisper</label>
+      <div class="row">
+        <select id="verb">
+          <option>talk</option>
+          <option>inspect</option>
+          <option>attack</option>
+          <option>use</option>
+          <option>custom</option>
+        </select>
+        <input id="target" placeholder="Target name" value="Mira" />
+      </div>
+      <textarea id="intentText" rows="2" placeholder="What do you attempt?"></textarea>
+      <button id="intentBtn" type="button">Send intent</button>
+    </section>
+
+    <section class="panel" style="flex: 1">
+      <label>Log</label>
+      <div id="log"></div>
+    </section>
+
+    <script>
+      const $ = (id) => document.getElementById(id)
+      const defaultUrl = `ws://${location.hostname || '127.0.0.1'}:${location.port || 3847}/ws`
+      $('url').value = defaultUrl
+
+      let ws = null
+      let tokens = []
+
+      function log(line, obj) {
+        const el = $('log')
+        const extra = obj ? '\n' + JSON.stringify(obj, null, 2) : ''
+        el.textContent += `[${new Date().toLocaleTimeString()}] ${line}${extra}\n`
+        el.scrollTop = el.scrollHeight
+      }
+
+      function setStatus(ok, text) {
+        const el = $('status')
+        el.className = 'status ' + (ok ? 'ok' : 'bad')
+        el.textContent = text
+      }
+
+      function fillTokens(list) {
+        tokens = list || []
+        const sel = $('tokenSelect')
+        const prev = sel.value
+        sel.innerHTML = '<option value="">(first / controlled token)</option>'
+        for (const t of tokens) {
+          const opt = document.createElement('option')
+          opt.value = t.id
+          opt.textContent = `${t.name} (${t.x}, ${t.y})`
+          sel.appendChild(opt)
+        }
+        if (prev) sel.value = prev
+      }
+
+      function connect() {
+        if (ws) ws.close()
+        const url = $('url').value.trim()
+        ws = new WebSocket(url)
+        setStatus(false, 'Connecting…')
+        log('connecting', { url })
+
+        ws.onopen = () => {
+          setStatus(true, 'Connected — sending hello')
+          ws.send(JSON.stringify({ type: 'hello', role: 'player', name: $('name').value.trim() || 'Hero' }))
+        }
+        ws.onclose = () => setStatus(false, 'Disconnected')
+        ws.onerror = () => log('socket error')
+        ws.onmessage = (ev) => {
+          let msg
+          try { msg = JSON.parse(ev.data) } catch { log('bad frame', ev.data); return }
+          log('← ' + msg.type, msg)
+          if (msg.type === 'hello-ok') {
+            setStatus(msg.foundryConnected, msg.foundryConnected ? 'Online (Foundry connected)' : 'Online (waiting for Foundry)')
+          }
+          if (msg.type === 'info') {
+            setStatus(!!msg.foundryConnected || $('status').classList.contains('ok'), msg.message || JSON.stringify(msg))
+          }
+          if (msg.type === 'state') fillTokens(msg.tokens)
+        }
+      }
+
+      function send(payload) {
+        if (!ws || ws.readyState !== 1) {
+          log('not connected')
+          return
+        }
+        ws.send(JSON.stringify(payload))
+        log('→ ' + payload.type, payload)
+      }
+
+      $('connectBtn').onclick = connect
+      $('disconnectBtn').onclick = () => ws?.close()
+      $('chatBtn').onclick = () => {
+        const text = $('chatText').value.trim()
+        if (!text) return
+        send({ type: 'chat', text })
+        $('chatText').value = ''
+      }
+      $('moveBtn').onclick = () => {
+        const tokenId = $('tokenSelect').value || undefined
+        const token = tokens.find((t) => t.id === tokenId)
+        send({
+          type: 'move',
+          tokenId,
+          tokenName: token?.name,
+          x: Number($('moveX').value),
+          y: Number($('moveY').value),
+        })
+      }
+      $('intentBtn').onclick = () => {
+        send({
+          type: 'intent',
+          verb: $('verb').value,
+          target: $('target').value.trim(),
+          text: $('intentText').value.trim(),
+        })
+      }
+      $('refreshTokens').onclick = () => send({ type: 'ping' })
+
+      // Auto-connect for convenience
+      connect()
+    </script>
+  </body>
+</html>

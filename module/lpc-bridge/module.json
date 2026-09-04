@@ -1,0 +1,25 @@
+{
+  "id": "lpc-bridge",
+  "title": "LPC Bridge (spike)",
+  "description": "Connects Foundry to an external player WebSocket bridge for chat, token moves, and intents.",
+  "version": "0.1.0",
+  "compatibility": {
+    "minimum": "12",
+    "verified": "13"
+  },
+  "authors": [
+    {
+      "name": "Arash"
+    }
+  ],
+  "esmodules": [
+    "scripts/main.mjs"
+  ],
+  "socket": true,
+  "styles": [
+    "styles/bridge.css"
+  ],
+  "url": "https://github.com/local/foundry-bridge",
+  "manifest": "",
+  "download": ""
+}
