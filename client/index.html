@@ -113,6 +113,10 @@
         <input id="url" value="" />
         <label>Name</label>
         <input id="name" value="Hero" style="flex: 0.5" />
+        <label>Room</label>
+        <input id="room" value="default" style="flex: 0.4" />
+        <label>Access key</label>
+        <input id="accessKey" type="password" value="" style="flex: 0.4" />
         <button id="connectBtn" type="button">Connect</button>
         <button id="disconnectBtn" class="secondary" type="button">Disconnect</button>
       </div>
@@ -176,6 +180,10 @@
       let ws = null
       let tokens = []
       const seenChat = new Set()
+
+      function envelope(kind, type, payload = {}, extra = {}) {
+        return { v: 1, kind, type, ...extra, payload }
+      }
 
       function log(line, obj) {
         const el = $('log')
@@ -246,6 +254,34 @@
         }
       }
 
+      function applySnapshot(payload) {
+        const mappedTokens = (payload.entities || [])
+          .filter((entity) => entity.documentType === 'Token')
+          .map((entity) => ({
+            id: entity.documentId,
+            name: entity.name,
+            x: entity.transform?.position?.x ?? 0,
+            y: entity.transform?.position?.z ?? 0,
+            hp: entity.actor?.hp ?? null,
+            maxHp: entity.actor?.maxHp ?? null,
+          }))
+        fillTokens(mappedTokens, payload.scene?.name)
+      }
+
+      function applyEntityUpdate(payload) {
+        const entity = payload.entity
+        if (!entity || entity.documentType !== 'Token') return
+        const next = {
+          id: entity.documentId,
+          name: entity.name,
+          x: entity.transform?.position?.x ?? 0,
+          y: entity.transform?.position?.z ?? 0,
+          hp: entity.actor?.hp ?? null,
+          maxHp: entity.actor?.maxHp ?? null,
+        }
+        fillTokens([...tokens.filter((token) => token.id !== next.id), next], $('sceneLabel').textContent.replace(/^Scene: /, ''))
+      }
+
       function escapeHtml(s) {
         return String(s)
           .replace(/&/g, '&amp;')
@@ -262,26 +298,31 @@
 
         ws.onopen = () => {
           setStatus(true, 'Connected — sending hello')
-          ws.send(JSON.stringify({ type: 'hello', role: 'player', name: $('name').value.trim() || 'Hero' }))
+          ws.send(JSON.stringify(envelope('hello', 'connection.hello', {
+            role: 'player',
+            roomId: $('room').value.trim() || 'default',
+            name: $('name').value.trim() || 'Hero',
+            accessKey: $('accessKey').value,
+            capabilities: ['world.snapshot'],
+          })))
         }
         ws.onclose = () => setStatus(false, 'Disconnected')
         ws.onerror = () => log('socket error')
         ws.onmessage = (ev) => {
           let msg
           try { msg = JSON.parse(ev.data) } catch { log('bad frame', ev.data); return }
-          if (msg.type !== 'state') log('← ' + msg.type, msg)
-          else log('← state', { scene: msg.scene, tokens: (msg.tokens || []).length, at: msg.at })
+          log('← ' + msg.type, msg.type === 'world.snapshot' ? { revision: msg.payload?.revision } : msg)
 
-          if (msg.type === 'hello-ok') {
-            setStatus(msg.foundryConnected, msg.foundryConnected ? 'Online (Foundry connected)' : 'Online (waiting for Foundry)')
-            if (msg.foundryConnected) send({ type: 'request-state' })
+          if (msg.type === 'connection.ready' || msg.type === 'room.status') {
+            const status = msg.payload || {}
+            setStatus(status.foundryConnected, status.foundryConnected ? 'Online (Foundry connected)' : 'Online (waiting for Foundry)')
+            if (status.foundryConnected) sendCommand('world.getSnapshot')
           }
-          if (msg.type === 'info') {
-            setStatus(!!msg.foundryConnected || $('status').classList.contains('ok'), msg.message || JSON.stringify(msg))
-            if (msg.foundryConnected) send({ type: 'request-state' })
-          }
-          if (msg.type === 'state') fillTokens(msg.tokens, msg.scene)
-          if (msg.type === 'chat') addChat(msg)
+          if (msg.type === 'connection.error') setStatus(false, `${msg.payload?.code}: ${msg.payload?.message}`)
+          if (msg.type === 'world.snapshot') applySnapshot(msg.payload || {})
+          if (msg.type === 'entity.created' || msg.type === 'entity.updated') applyEntityUpdate(msg.payload || {})
+          if (msg.type === 'entity.deleted') fillTokens(tokens.filter((token) => `Token.${token.id}` !== msg.payload?.entityId), $('sceneLabel').textContent.replace(/^Scene: /, ''))
+          if (msg.type === 'chat.message') addChat({ ...msg.payload, source: 'foundry' })
         }
       }
 
@@ -294,34 +335,38 @@
         if (payload.type !== 'request-state') log('→ ' + payload.type, payload)
       }
 
+      function sendCommand(type, payload = {}) {
+        send(envelope('command', type, payload, { id: crypto.randomUUID() }))
+      }
+
       $('connectBtn').onclick = connect
       $('disconnectBtn').onclick = () => ws?.close()
       $('chatBtn').onclick = () => {
         const text = $('chatText').value.trim()
         if (!text) return
-        send({ type: 'chat', text })
+        sendCommand('chat.send', { text })
         $('chatText').value = ''
       }
       $('moveBtn').onclick = () => {
         const tokenId = $('tokenSelect').value || undefined
         const token = tokens.find((t) => t.id === tokenId)
-        send({
-          type: 'move',
+        sendCommand('token.move', {
           tokenId,
-          tokenName: token?.name,
-          x: Number($('moveX').value),
-          y: Number($('moveY').value),
+          destination: {
+            x: Number($('moveX').value),
+            y: 0,
+            z: Number($('moveY').value),
+          },
         })
       }
       $('intentBtn').onclick = () => {
-        send({
-          type: 'intent',
+        sendCommand('intent.submit', {
           verb: $('verb').value,
-          target: $('target').value.trim(),
+          targetEntityId: $('target').value.trim(),
           text: $('intentText').value.trim(),
         })
       }
-      $('refreshTokens').onclick = () => send({ type: 'request-state' })
+      $('refreshTokens').onclick = () => sendCommand('world.getSnapshot')
 
       connect()
     </script>
