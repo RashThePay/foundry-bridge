@@ -1,87 +1,49 @@
-import { AssetRegistry, installAuthoring } from './authoring.mjs'
+import { handleActionPreflight, handleActionUse, handleInitiative, buildActorSheet, extractRolls, installBridgeChatNotificationFilter } from './actions.mjs'
+import { AssetGateway } from './assets.mjs'
+import { AssetRegistry, installAuthoring, refreshSceneControls } from './authoring.mjs'
+import { forwardFoundryChat, handleChat, handleIntent, partyConnectionIds } from './chat.mjs'
+import { installGmPanel } from './gm-panel.mjs'
+import {
+  DEFAULT_ENTITY_2D,
+  DEFAULT_WORLD_2D,
+  MODULE_ID,
+  claimantOf,
+  envelope,
+  facingFromDelta,
+  isPlayableToken,
+  mergeDefaults,
+  migrateEntity2d,
+  migrateWorld2d,
+  sceneBackgroundSrc,
+  serializeCombat,
+  serializeWall,
+  movementAnimationSpeed,
+  tileTextureSrc,
+  tokenDisplayName,
+  tokenTextureSrc,
+} from './snapshot.mjs'
 
-const MODULE_ID = 'lpc-bridge'
-const PROTOCOL_VERSION = 1
-
-const FACINGS = ['down', 'left', 'right', 'up']
-
-const DEFAULT_WORLD_2D = Object.freeze({
-  mapId: null,
-  tilesetId: null,
-  unitsPerGridSquare: 1,
-  lighting: {},
-  fog: {},
-  camera: {},
-})
-
-const DEFAULT_ENTITY_2D = Object.freeze({
-  spriteId: null,
-  entityType: null,
-  visible: true,
-  selectable: true,
-  facing: 'down',
-  scale: { x: 1, y: 1 },
-  interaction: {},
-  controllers: [],
-})
-
-function migrateWorld2d(stored) {
-  if (!stored) return {}
-  const preset = stored.camera?.preset === 'isometric' ? 'top-down' : stored.camera?.preset
-  return {
-    mapId: stored.environmentId ?? stored.mapId ?? null,
-    tilesetId: stored.tilesetId ?? null,
-    unitsPerGridSquare: stored.unitsPerGridSquare ?? stored.worldUnitsPerGridSquare ?? 1,
-    lighting: {
-      preset: stored.lighting?.preset,
-      ambient: stored.lighting?.ambient,
-      color: stored.lighting?.color,
-    },
-    fog: stored.fog,
-    camera: { preset: preset || 'follow' },
-  }
-}
-
-function migrateEntity2d(stored) {
-  if (!stored) return {}
-  return {
-    spriteId: stored.spriteId ?? stored.prefabId ?? null,
-    entityType: stored.entityType,
-    visible: stored.visible,
-    selectable: stored.selectable,
-    facing: FACINGS.includes(stored.facing) ? stored.facing : 'down',
-    scale: { x: stored.scale?.x ?? 1, y: stored.scale?.y ?? 1 },
-    interaction: stored.interaction,
-    controllers: stored.controllers,
-  }
-}
-
-function envelope(kind, type, payload = {}, extra = {}) {
-  return { v: PROTOCOL_VERSION, kind, type, ...extra, payload }
-}
-
-function clone(value) {
-  return value == null ? value : structuredClone(value)
-}
-
-function mergeDefaults(defaults, value) {
-  const target = clone(defaults)
-  for (const [key, next] of Object.entries(value || {})) {
-    const current = target[key]
-    const objects = current && next && typeof current === 'object' && typeof next === 'object'
-      && !Array.isArray(current) && !Array.isArray(next)
-    target[key] = objects ? mergeDefaults(current, next) : clone(next)
-  }
-  return target
-}
+const REVISIONED_EVENTS = new Set([
+  'token.moved', 'entity.created', 'entity.updated', 'entity.deleted',
+  'wall.updated', 'wall.deleted', 'scene.updated', 'scene.activated',
+  'actor.updated', 'combat.updated',
+])
 
 class FoundryBridge {
   constructor(assetRegistry) {
     this.assetRegistry = assetRegistry
+    this.assets = new AssetGateway()
     this.ws = null
     this.reconnectTimer = null
     this.manualClose = false
     this.revision = 0
+    this.clients = new Map()
+    this.intents = new Map()
+    this.npcThreads = new Map()
+    this.gmPanel = null
+    this.keepAliveWorker = null
+    this.pendingMovementTokens = new Set()
+    this.resolutions = []
   }
 
   get enabled() {
@@ -93,11 +55,40 @@ class FoundryBridge {
   }
 
   get roomId() {
-    return game.settings.get(MODULE_ID, 'roomId') || 'default'
+    return game.settings.get(MODULE_ID, 'campaignId') || 'default'
   }
 
   get accessKey() {
-    return game.settings.get(MODULE_ID, 'accessKey') || ''
+    return game.settings.get(MODULE_ID, 'foundryCredential') || ''
+  }
+
+  gatewayHttp() {
+    return String(this.url || '').replace(/^ws/i, 'http').replace(/\/ws\/?$/, '')
+  }
+
+  async api(path, { method = 'GET', credential = this.accessKey, body } = {}) {
+    const response = await fetch(`${this.gatewayHttp()}${path}`, {
+      method,
+      headers: { authorization: `Bearer ${credential}`, ...(body ? { 'content-type': 'application/json' } : {}) },
+      body: body ? JSON.stringify(body) : undefined,
+    })
+    const result = await response.json().catch(() => ({}))
+    if (!response.ok) throw new Error(result.error?.message || `Bridge request failed (${response.status})`)
+    return result
+  }
+
+  async createCampaign(ownerCredential) {
+    const result = await this.api('/api/v2/campaigns', { method: 'POST', credential: ownerCredential, body: { name: game.world.title, worldId: game.world.id } })
+    await game.settings.set(MODULE_ID, 'campaignId', result.campaignId)
+    await game.settings.set(MODULE_ID, 'foundryCredential', result.foundryCredential)
+    await game.settings.set(MODULE_ID, 'inviteUrl', result.inviteUrl)
+    this.connect()
+    return result
+  }
+
+  async setCharacterPin(token, pin) {
+    if (!token?.actor) throw new Error('Select a token with an actor.')
+    return this.api(`/api/v2/campaigns/${encodeURIComponent(this.roomId)}/characters`, { method: 'PUT', body: { actorId: token.actor.id, tokenId: token.id, name: token.name || token.actor.name, pin } })
   }
 
   connect() {
@@ -117,18 +108,22 @@ class FoundryBridge {
     this.ws.addEventListener('open', () => {
       this.send(envelope('hello', 'connection.hello', {
         role: 'foundry',
-        roomId: this.roomId,
-        name: game.user.name,
-        accessKey: this.accessKey,
+        campaignId: this.roomId,
+        credential: this.accessKey,
         capabilities: [
           'world.snapshot',
           'entity.events',
           'token.move',
+          'door.toggle',
+          'actor.claim',
           'chat.send',
           'intent.submit',
+          'action.use',
+          'combat.updated',
         ],
       }))
       ui.notifications?.info(`Foundry Bridge connected (${this.roomId})`)
+      this.startKeepAlive()
     })
     this.ws.addEventListener('message', (event) => this.onMessage(event.data))
     this.ws.addEventListener('close', () => {
@@ -140,10 +135,35 @@ class FoundryBridge {
 
   disconnect(manual = true) {
     this.manualClose = manual
+    this.stopKeepAlive()
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
     this.reconnectTimer = null
     if (this.ws) this.ws.close()
     this.ws = null
+  }
+
+  startKeepAlive() {
+    this.stopKeepAlive()
+    try {
+      const blob = new Blob(['setInterval(() => postMessage(1), 200)'], { type: 'text/javascript' })
+      const url = URL.createObjectURL(blob)
+      this.keepAliveWorker = new Worker(url)
+      this.keepAliveWorker.onmessage = () => {}
+      this.keepAliveUrl = url
+    } catch (error) {
+      console.warn(`${MODULE_ID} | keep-alive worker unavailable`, error)
+    }
+  }
+
+  stopKeepAlive() {
+    if (this.keepAliveWorker) {
+      this.keepAliveWorker.terminate()
+      this.keepAliveWorker = null
+    }
+    if (this.keepAliveUrl) {
+      URL.revokeObjectURL(this.keepAliveUrl)
+      this.keepAliveUrl = null
+    }
   }
 
   scheduleReconnect() {
@@ -169,8 +189,75 @@ class FoundryBridge {
     }, { replyTo: command.id }))
   }
 
-  emit(type, payload = {}) {
-    this.send(envelope('event', type, { revision: ++this.revision, ...payload }))
+  emit(type, payload = {}, extra = {}) {
+    const versionedPayload = REVISIONED_EVENTS.has(type)
+      ? { revision: ++this.revision, ...payload }
+      : payload
+    this.send(envelope('event', type, versionedPayload, extra))
+  }
+
+  threadFor(entityId, connectionId = null) {
+    const id = entityId || 'world'
+    const key = `${id}::${connectionId || 'public'}`
+    if (!this.npcThreads.has(key)) this.npcThreads.set(key, {
+      key,
+      entityId: id,
+      connectionId,
+      playerName: connectionId ? this.clients.get(connectionId)?.characterName || this.clients.get(connectionId)?.name || 'Player' : null,
+      messages: [],
+    })
+    return this.npcThreads.get(key)
+  }
+
+  recordResolution(data) {
+    if (!data?.activity) return null
+    const id = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`
+    const deltas = data.usage?.message?.system?.deltas || data.usage?.message?.data?.system?.deltas || null
+    const actors = (data.actors || []).filter((state) => state?.after
+      && (state.hp !== state.after.hp || state.tempHp !== state.after.tempHp || state.tempMax !== state.after.tempMax))
+    if (!actors.length && !deltas) return null
+    const resolution = {
+      id,
+      label: data.label || 'Remote action',
+      createdAt: Date.now(),
+      undoneAt: null,
+      activity: data.activity,
+      deltas,
+      actors,
+      applied: data.applied || [],
+      saves: data.saves || [],
+    }
+    this.resolutions.unshift(resolution)
+    this.resolutions = this.resolutions.slice(0, 12)
+    this.gmPanel?.render?.({ force: true })
+    return resolution
+  }
+
+  async undoResolution(id) {
+    const resolution = this.resolutions.find((entry) => entry.id === id)
+    if (!resolution || resolution.undoneAt) throw new Error('That resolution is no longer available to undo.')
+    for (const state of resolution.actors) {
+      const hp = state.actor?.system?.attributes?.hp
+      if (!hp || Number(hp.value) !== state.after.hp || Number(hp.temp || 0) !== state.after.tempHp) {
+        throw new Error(`${state.actorName}'s HP changed after this action. Undo was stopped to avoid overwriting newer play.`)
+      }
+    }
+    if (resolution.deltas && resolution.activity?.refund) await resolution.activity.refund(resolution.deltas)
+    for (const state of resolution.actors) {
+      await state.actor.update({
+        'system.attributes.hp.value': state.hp,
+        'system.attributes.hp.temp': state.tempHp,
+        'system.attributes.hp.tempmax': state.tempMax,
+      })
+    }
+    resolution.undoneAt = Date.now()
+    this.emit('action.undone', {
+      resolutionId: resolution.id,
+      label: resolution.label,
+      createdAt: resolution.undoneAt,
+    }, { audience: { connectionIds: partyConnectionIds(this) } })
+    this.gmPanel?.render?.({ force: true })
+    return resolution
   }
 
   async onMessage(raw) {
@@ -183,23 +270,43 @@ class FoundryBridge {
 
     if (message.kind !== 'command') {
       if (message.type === 'connection.ready') this.pushSnapshot()
+      if (message.type === 'client.connected') this.onClientConnected(message.payload || {})
+      if (message.type === 'client.disconnected') this.onClientDisconnected(message.payload || {})
       return
     }
 
     try {
       switch (message.type) {
-        case 'world.getSnapshot':
-          this.pushSnapshot()
+        case 'world.snapshot.request':
+          await this.pushSnapshot()
           this.respond(message, { revision: this.revision })
           return
-        case 'token.move':
+        case 'actor.claim':
+          await this.handleClaim(message)
+          return
+        case 'actor.release':
+          await this.handleRelease(message)
+          return
+        case 'movement.request':
           await this.handleTokenMove(message)
           return
+        case 'door.toggle':
+          await this.handleDoorToggle(message)
+          return
         case 'chat.send':
-          await this.handleChat(message)
+          await handleChat(this, message)
           return
         case 'intent.submit':
-          await this.handleIntent(message)
+          await handleIntent(this, message)
+          return
+        case 'action.execute':
+          await handleActionUse(this, message)
+          return
+        case 'action.preflight':
+          await handleActionPreflight(this, message)
+          return
+        case 'combat.rollInitiative':
+          await handleInitiative(this, message)
           return
         case 'connection.ping':
           this.respond(message, { pong: true, receivedAt: Date.now() })
@@ -213,17 +320,71 @@ class FoundryBridge {
     }
   }
 
+  onClientConnected(payload) {
+    const connectionId = payload.connectionId
+    if (!connectionId) return
+    this.clients.set(connectionId, {
+      name: payload.name || 'Player',
+      role: payload.role || 'player',
+      claimedTokenId: payload.tokenId || null,
+      actorId: payload.actorId || null,
+      characterName: payload.name || null,
+    })
+    const restored = this.activeScene()?.tokens?.get(payload.tokenId) || this.findRestorableToken(payload)
+    if (restored) this.claimToken(connectionId, restored, { reconnect: true }).catch((error) => {
+      console.warn(`${MODULE_ID} | reconnect claim failed`, error)
+    })
+    this.gmPanel?.render?.({ force: true })
+  }
+
+  onClientDisconnected(payload) {
+    const client = this.clients.get(payload.connectionId)
+    if (client?.claimedTokenId) {
+      const token = this.activeScene()?.tokens?.get(client.claimedTokenId)
+      if (token) {
+        const config = this.entity2d(token)
+        token.setFlag(MODULE_ID, 'entity2d', {
+          ...config,
+          controllers: [client.name].filter(Boolean),
+        }).catch(() => null)
+      }
+    }
+    this.clients.delete(payload.connectionId)
+    this.gmPanel?.render?.({ force: true })
+  }
+
+  findRestorableToken(payload) {
+    const scene = this.activeScene()
+    if (!scene) return null
+    if (payload.claimedTokenId) {
+      const token = scene.tokens.get(payload.claimedTokenId)
+      if (token && this.isAvailableFor(token, payload)) return token
+    }
+    return [...scene.tokens].find((token) => {
+      const config = this.entity2d(token)
+      return (config.controllers || []).includes(payload.name) && this.isAvailableFor(token, payload)
+    }) || null
+  }
+
+  isAvailableFor(token, payload) {
+    for (const [id, client] of this.clients) {
+      if (id !== payload.connectionId && client.claimedTokenId === token.id) return false
+    }
+    return isPlayableToken(token, this.entity2d(token))
+  }
+
   activeScene() {
     return canvas?.scene || game.scenes?.active || null
   }
 
   world2d(scene) {
-    const stored = scene?.getFlag(MODULE_ID, 'world2d') || scene?.getFlag(MODULE_ID, 'world3d')
+    const stored = scene?.getFlag(MODULE_ID, 'world2d')
     return mergeDefaults(DEFAULT_WORLD_2D, migrateWorld2d(stored))
   }
 
   entity2d(document) {
-    const stored = document?.getFlag(MODULE_ID, 'entity2d') || document?.getFlag(MODULE_ID, 'entity3d')
+    const stored = document?.getFlag(MODULE_ID, 'entity2d')
+      || document?.actor?.prototypeToken?.getFlag?.(MODULE_ID, 'entity2d')
     return mergeDefaults(DEFAULT_ENTITY_2D, migrateEntity2d(stored))
   }
 
@@ -257,26 +418,42 @@ class FoundryBridge {
     const config = this.entity2d(document)
     const actor = document.actor
     const hp = actor?.system?.attributes?.hp
+    const conditions = [...(actor?.statuses || [])].map((status) => String(status))
+    if (!conditions.length && actor?.effects) {
+      for (const effect of actor.effects) {
+        if (!effect.disabled && effect.name) conditions.push(effect.name)
+      }
+    }
+    const claim = claimantOf(document, config, this.clients)
     return {
       id: `Token.${document.id}`,
       documentType: 'Token',
       documentId: document.id,
-      entityType: config.entityType || (actor ? 'actor' : 'token'),
+      entityType: config.entityType || (actor?.type === 'npc' ? 'npc' : actor ? 'actor' : 'token'),
       name: document.name,
       spriteId: config.spriteId,
+      textureUrl: tokenTextureSrc(document),
       transform: {
         position: this.canvasToWorld(scene, document.x, document.y),
         facing: config.facing,
         scale: config.scale,
+        width: Math.max(0.25, Number(document.width) || 1) * this.worldUnits(scene),
+        height: Math.max(0.25, Number(document.height) || 1) * this.worldUnits(scene),
       },
       visible: config.visible !== false && !document.hidden,
       selectable: config.selectable !== false,
       interaction: config.interaction,
       disposition: document.disposition,
+      claimable: isPlayableToken(document, config),
+      ...claim,
       actor: actor ? {
         id: actor.id,
+        type: actor.type,
         hp: hp?.value ?? null,
         maxHp: hp?.max ?? null,
+        tempHp: hp?.temp ?? 0,
+        conditions,
+        dead: conditions.includes('dead') || Number(hp?.value) <= 0,
       } : null,
     }
   }
@@ -284,18 +461,23 @@ class FoundryBridge {
   tileEntity(document) {
     const scene = document.parent
     const config = this.entity2d(document)
-    if (!config.spriteId) return null
+    const textureUrl = tileTextureSrc(document)
+    if (!config.spriteId && !textureUrl) return null
+    const grid = this.gridSize(scene)
     return {
       id: `Tile.${document.id}`,
       documentType: 'Tile',
       documentId: document.id,
       entityType: config.entityType || 'prop',
-      name: document.texture?.src?.split('/').pop() || 'World object',
+      name: textureUrl?.split('/').pop() || 'World object',
       spriteId: config.spriteId,
+      textureUrl,
       transform: {
         position: this.canvasToWorld(scene, document.x, document.y),
         facing: config.facing,
         scale: config.scale,
+        width: Number(document.width || grid) / grid * this.worldUnits(scene),
+        height: Number(document.height || grid) / grid * this.worldUnits(scene),
       },
       visible: config.visible !== false && !document.hidden,
       selectable: config.selectable !== false,
@@ -309,9 +491,31 @@ class FoundryBridge {
     return null
   }
 
+  playableCharacters(scene) {
+    if (!scene) return []
+    return [...scene.tokens]
+      .filter((document) => isPlayableToken(document, this.entity2d(document)))
+      .map((document) => {
+        const config = this.entity2d(document)
+        const claim = claimantOf(document, config, this.clients)
+        return {
+          tokenId: document.id,
+          actorId: document.actorId || document.actor?.id || null,
+          name: document.name,
+          textureUrl: tokenTextureSrc(document),
+          ...claim,
+        }
+      })
+  }
+
+  combatState() {
+    return serializeCombat()
+  }
+
   snapshot() {
     const scene = this.activeScene()
     const map = this.world2d(scene)
+    const toWorld = (x, y) => this.canvasToWorld(scene, x, y)
     const entities = scene
       ? [
           ...scene.tokens.map((document) => this.tokenEntity(document)),
@@ -336,21 +540,117 @@ class FoundryBridge {
           height: scene.height / this.gridSize(scene) * this.worldUnits(scene),
           gridSize: this.gridSize(scene),
         },
-        map,
+        map: {
+          ...map,
+          backgroundUrl: sceneBackgroundSrc(scene),
+        },
+        // Foundry owns collision. The client receives only doors it can
+        // interact with, never the scene's wall mesh.
+        walls: [...(scene.walls || [])]
+          .filter((wall) => {
+            const kind = Number(wall.door || 0)
+            const normal = CONST?.WALL_DOOR_TYPES?.DOOR ?? 1
+            const secret = CONST?.WALL_DOOR_TYPES?.SECRET ?? 2
+            const open = CONST?.WALL_DOOR_STATES?.OPEN ?? 1
+            return kind === normal || (kind === secret && wall.ds === open)
+          })
+          .map((wall) => serializeWall(wall, toWorld)),
       } : null,
+      combat: this.combatState(),
+      playableCharacters: this.playableCharacters(scene),
       entities,
       assets: this.assetRegistry.snapshot(),
     }
   }
 
-  pushSnapshot() {
-    this.send(envelope('event', 'world.snapshot', this.snapshot()))
+  async pushSnapshot() {
+    const payload = this.snapshot()
+    await this.assets.rewriteSnapshot(this, payload)
+    this.send(envelope('event', 'world.snapshot', payload))
+  }
+
+  pushCombat() {
+    this.emit('combat.updated', this.combatState())
+    this.gmPanel?.render?.({ force: true })
+  }
+
+  async pushActorSheet(token, connectionId) {
+    const sheet = buildActorSheet(token?.actor, token)
+    if (!sheet) return
+    await this.assets.rewriteActorSheet(this, sheet)
+    const extra = connectionId ? { audience: { connectionIds: [connectionId] } } : {}
+    this.emit('actor.sheet', { tokenId: token.id, sheet }, extra)
   }
 
   canControl(document, source) {
+    const client = this.clients.get(source?.connectionId)
+    if (client?.claimedTokenId === document.id) return true
     const controllers = this.entity2d(document).controllers || []
-    if (!controllers.length) return true
     return controllers.includes(source?.connectionId) || controllers.includes(source?.name)
+  }
+
+  async claimToken(connectionId, token, { reconnect = false } = {}) {
+    const client = this.clients.get(connectionId)
+    if (!client) return
+    if (client.claimedTokenId && client.claimedTokenId !== token.id) {
+      await this.releaseConnection(connectionId, { silent: true })
+    }
+    const config = this.entity2d(token)
+    await token.setFlag(MODULE_ID, 'entity2d', {
+      ...config,
+      controllers: [connectionId, client.name].filter(Boolean),
+    })
+    client.claimedTokenId = token.id
+    client.characterName = tokenDisplayName(token)
+    this.emit('entity.updated', { entity: this.tokenEntity(token) })
+    await this.pushActorSheet(token, connectionId)
+    this.gmPanel?.render?.({ force: true })
+    if (!reconnect) ui.notifications?.info(`${client.characterName} is in play`)
+  }
+
+  async handleClaim(command) {
+    const tokenId = command.payload?.tokenId
+    const scene = this.activeScene()
+    const token = scene?.tokens?.get(tokenId)
+    if (!token) {
+      this.reject(command, 'TOKEN_NOT_FOUND', `Token ${tokenId} is not in the active scene.`)
+      return
+    }
+    if (!isPlayableToken(token, this.entity2d(token))) {
+      this.reject(command, 'PERMISSION_DENIED', 'That token is not a playable character.')
+      return
+    }
+    if (!this.isAvailableFor(token, command.source || {})) {
+      this.reject(command, 'PERMISSION_DENIED', 'That character is already claimed.')
+      return
+    }
+    this.clients.set(command.source.connectionId, {
+      name: command.source.name,
+      role: command.source.role || 'player',
+      claimedTokenId: this.clients.get(command.source.connectionId)?.claimedTokenId || null,
+      characterName: this.clients.get(command.source.connectionId)?.characterName || null,
+    })
+    await this.claimToken(command.source.connectionId, token)
+    this.respond(command, { tokenId, actorId: token.actorId || token.actor?.id || null })
+  }
+
+  async releaseConnection(connectionId, { silent = false } = {}) {
+    const client = this.clients.get(connectionId)
+    if (!client?.claimedTokenId) return
+    const token = this.activeScene()?.tokens?.get(client.claimedTokenId)
+    client.claimedTokenId = null
+    client.characterName = null
+    if (token) {
+      const config = this.entity2d(token)
+      await token.setFlag(MODULE_ID, 'entity2d', { ...config, controllers: [] })
+      this.emit('entity.updated', { entity: this.tokenEntity(token) })
+    }
+    if (!silent) this.gmPanel?.render?.({ force: true })
+  }
+
+  async handleRelease(command) {
+    await this.releaseConnection(command.source?.connectionId)
+    this.respond(command, { ok: true })
   }
 
   async handleTokenMove(command) {
@@ -371,56 +671,137 @@ class FoundryBridge {
       this.reject(command, 'PERMISSION_DENIED', 'This client may not control that token.')
       return
     }
-    const resolved = { x, y }
-    await document.update(this.worldToCanvas(scene, resolved))
-    this.respond(command, { tokenId, destination: resolved })
-  }
-
-  async handleChat(command) {
-    const text = String(command.payload?.text || '').trim()
-    if (!text) {
-      this.reject(command, 'INVALID_ARGUMENT', 'Chat text is required.')
+    if (document.locked) {
+      this.reject(command, 'TOKEN_LOCKED', 'That token is locked in Foundry.')
       return
     }
-    const speaker = String(command.source?.name || 'Player').slice(0, 60)
-    const created = await ChatMessage.create({
-      content: foundry.utils.escapeHTML(text),
-      speaker: { alias: `[Bridge] ${speaker}` },
-      style: CONST.CHAT_MESSAGE_STYLES.OTHER,
-      flags: { [MODULE_ID]: { fromClient: true, connectionId: command.source?.connectionId } },
-    })
-    this.respond(command, { messageId: created?.id || null })
-  }
-
-  async handleIntent(command) {
-    const payload = command.payload || {}
-    const text = String(payload.text || '').trim()
-    if (!text) {
-      this.reject(command, 'INVALID_ARGUMENT', 'Intent text is required.')
+    if (this.pendingMovementTokens.has(tokenId)) {
+      this.reject(command, 'MOVEMENT_BUSY', 'That character is already moving.')
       return
     }
-    const player = foundry.utils.escapeHTML(command.source?.name || 'Player')
-    const verb = foundry.utils.escapeHTML(payload.verb || 'do something')
-    const target = foundry.utils.escapeHTML(payload.targetEntityId || 'the world')
-    const created = await ChatMessage.create({
-      content: `<div class="lpc-intent"><strong>${player}</strong> wants to <em>${verb}</em> <strong>${target}</strong>: ${foundry.utils.escapeHTML(text)}</div>`,
-      speaker: { alias: 'Player Intent' },
-      style: CONST.CHAT_MESSAGE_STYLES.OTHER,
-      whisper: ChatMessage.getWhisperRecipients('GM').map((user) => user.id),
-      flags: { [MODULE_ID]: { fromClient: true, intent: true, payload: clone(payload) } },
+
+    const placeable = document.object || canvas.tokens?.get(tokenId)
+    if (!placeable?.findMovementPath || typeof document.move !== 'function') {
+      this.reject(command, 'MOVEMENT_UNAVAILABLE', 'Foundry movement is not ready for that token.')
+      return
+    }
+
+    const requested = this.worldToCanvas(scene, { x, y })
+    const snapped = document.getSnappedPosition?.(requested) || requested
+    const origin = { x: Number(document.x), y: Number(document.y) }
+    if (Math.hypot(snapped.x - origin.x, snapped.y - origin.y) < 0.5) {
+      this.reject(command, 'ALREADY_THERE', 'The character is already there.')
+      return
+    }
+
+    const job = placeable.findMovementPath([
+      { ...origin, explicit: true },
+      { x: snapped.x, y: snapped.y, explicit: true },
+    ], {
+      constrainOptions: { ignoreWalls: false, ignoreCost: false },
+      delay: 0,
     })
-    ui.notifications?.info(`Intent from ${command.source?.name || 'Player'}`)
-    this.respond(command, { messageId: created?.id || null })
+    const foundryPath = await job.promise
+    const reached = foundryPath?.at(-1)
+    if (!foundryPath || foundryPath.length < 2 || !reached
+      || Math.hypot(Number(reached.x) - snapped.x, Number(reached.y) - snapped.y) > 1) {
+      this.reject(command, 'PATH_BLOCKED', 'Foundry could not find an unobstructed path to that point.')
+      return
+    }
+
+    this.pendingMovementTokens.add(tokenId)
+    let completed = false
+    try {
+      completed = await document.move(foundryPath.slice(1), {
+        animate: false,
+        pan: false,
+        showRuler: false,
+        constrainOptions: { ignoreWalls: false, ignoreCost: false },
+      })
+    } finally {
+      this.pendingMovementTokens.delete(tokenId)
+    }
+    if (!completed) {
+      await this.onDocumentUpdated(document, { x: document.x, y: document.y })
+      this.reject(command, 'MOVEMENT_REJECTED', 'Foundry prevented or interrupted that movement.')
+      return
+    }
+
+    const worldPath = []
+    let previous = origin
+    for (const point of foundryPath.slice(1)) {
+      if (![Number(point.x), Number(point.y)].every(Number.isFinite)) continue
+      const facing = facingFromDelta(Number(point.x) - previous.x, Number(point.y) - previous.y)
+      worldPath.push({ ...this.canvasToWorld(scene, point.x, point.y), facing })
+      previous = { x: Number(point.x), y: Number(point.y) }
+    }
+    const authoritativeDestination = this.canvasToWorld(scene, document.x, document.y)
+    const last = worldPath.at(-1)
+    const facing = last?.facing || this.entity2d(document).facing
+    if (!last || Math.hypot(last.x - authoritativeDestination.x, last.y - authoritativeDestination.y) > 0.001) {
+      worldPath.push({ ...authoritativeDestination, facing })
+    }
+    const movementSpeed = movementAnimationSpeed({
+      movement: document.actor?.system?.attributes?.movement,
+      gridDistance: scene.grid?.distance,
+      roundSeconds: CONFIG?.time?.roundTime || 6,
+      worldUnits: this.worldUnits(scene),
+    })
+    this.emit('token.moved', { tokenId, path: worldPath, destination: authoritativeDestination, facing, movementSpeed })
+    const config = this.entity2d(document)
+    await document.setFlag(MODULE_ID, 'entity2d', { ...config, facing })
+    this.respond(command, { tokenId, path: worldPath, destination: authoritativeDestination, facing, movementSpeed })
   }
 
-  onDocumentCreated(document) {
-    const entity = this.documentEntity(document)
-    if (entity && document.parent?.id === this.activeScene()?.id) this.emit('entity.created', { entity })
+  async handleDoorToggle(command) {
+    const wallId = command.payload?.wallId
+    const scene = this.activeScene()
+    const wall = scene?.walls?.get(wallId)
+    if (!wall) {
+      this.reject(command, 'WALL_NOT_FOUND', `Wall ${wallId} is not in the active scene.`)
+      return
+    }
+    const kind = Number(wall.door || 0)
+    if (kind === (CONST?.WALL_DOOR_TYPES?.NONE ?? 0)) {
+      this.reject(command, 'NOT_A_DOOR', 'That wall is not a door.')
+      return
+    }
+    if (kind === (CONST?.WALL_DOOR_TYPES?.SECRET ?? 2) && wall.ds === (CONST?.WALL_DOOR_STATES?.CLOSED ?? 0)) {
+      this.reject(command, 'PERMISSION_DENIED', 'That door cannot be used.')
+      return
+    }
+    if (wall.ds === (CONST?.WALL_DOOR_STATES?.LOCKED ?? 2)) {
+      this.reject(command, 'PERMISSION_DENIED', 'That door is locked.')
+      return
+    }
+    const client = this.clients.get(command.source?.connectionId)
+    if (!client?.claimedTokenId) {
+      this.reject(command, 'PERMISSION_DENIED', 'Claim a character before interacting with doors.')
+      return
+    }
+    const closed = CONST?.WALL_DOOR_STATES?.CLOSED ?? 0
+    const open = CONST?.WALL_DOOR_STATES?.OPEN ?? 1
+    const next = wall.ds === open ? closed : open
+    await wall.update({ ds: next }, { animate: false, diff: false })
+    this.respond(command, { wallId, doorState: next === open ? 'open' : 'closed' })
   }
 
-  onDocumentUpdated(document, changes) {
+  async onDocumentCreated(document) {
     const entity = this.documentEntity(document)
-    if (entity && document.parent?.id === this.activeScene()?.id) this.emit('entity.updated', { entity, changes })
+    if (entity && document.parent?.id === this.activeScene()?.id) {
+      await this.assets.rewriteEntity(this, entity)
+      this.emit('entity.created', { entity })
+    }
+  }
+
+  async onDocumentUpdated(document, changes) {
+    if (document?.documentName === 'Token' && this.pendingMovementTokens.has(document.id)
+      && ('x' in (changes || {}) || 'y' in (changes || {}))) return
+    const entity = this.documentEntity(document)
+    if (entity && document.parent?.id === this.activeScene()?.id) {
+      await this.assets.rewriteEntity(this, entity)
+      this.emit('entity.updated', { entity, changes })
+    }
   }
 
   onDocumentDeleted(document) {
@@ -428,32 +809,75 @@ class FoundryBridge {
     this.emit('entity.deleted', { entityId: `${document.documentName}.${document.id}` })
   }
 
+  onWallChanged(document) {
+    if (document.parent?.id !== this.activeScene()?.id) return
+    const kind = Number(document.door || 0)
+    const normal = CONST?.WALL_DOOR_TYPES?.DOOR ?? 1
+    const secret = CONST?.WALL_DOOR_TYPES?.SECRET ?? 2
+    const open = CONST?.WALL_DOOR_STATES?.OPEN ?? 1
+    if (kind !== normal && !(kind === secret && document.ds === open)) {
+      this.emit('wall.deleted', { wallId: document.id })
+      return
+    }
+    const wall = serializeWall(document, (x, y) => this.canvasToWorld(document.parent, x, y))
+    this.emit('wall.updated', { wall })
+  }
+
+  onWallDeleted(document) {
+    if (document.parent?.id !== this.activeScene()?.id) return
+    this.emit('wall.deleted', { wallId: document.id })
+  }
+
   onActorUpdated(actor, changes) {
     const scene = this.activeScene()
     if (!scene) return
-    const tokenIds = scene.tokens.filter((token) => token.actorId === actor.id).map((token) => token.id)
+    const tokens = scene.tokens.filter((token) => token.actorId === actor.id)
+    const tokenIds = tokens.map((token) => token.id)
+    const hp = actor.system?.attributes?.hp
+    const conditions = [...(actor.statuses || [])].map((status) => String(status))
+    if (!conditions.length && actor.effects) {
+      for (const effect of actor.effects) {
+        if (!effect.disabled && effect.name) conditions.push(effect.name)
+      }
+    }
     if (tokenIds.length) this.emit('actor.updated', {
       actorId: actor.id,
       tokenIds,
-      changes,
-      hp: actor.system?.attributes?.hp?.value ?? null,
-      maxHp: actor.system?.attributes?.hp?.max ?? null,
+      hp: hp?.value ?? null,
+      maxHp: hp?.max ?? null,
+      tempHp: hp?.temp ?? 0,
+      conditions,
+      dead: conditions.includes('dead') || Number(hp?.value) <= 0,
     })
+    for (const token of tokens) {
+      const owner = [...this.clients.entries()].find(([, client]) => client.claimedTokenId === token.id)
+      if (owner) void this.pushActorSheet(token, owner[0])
+    }
   }
 
-  forwardFoundryChat(message) {
-    if (!message || message.getFlag?.(MODULE_ID, 'fromClient') || message.whisper?.length) return
-    const container = document.createElement('div')
-    container.innerHTML = message.content || ''
-    const text = (container.textContent || '').replace(/\s+/g, ' ').trim()
-    if (!text) return
-    const speaker = message.speaker?.alias || message.author?.name || game.users?.get(message.author)?.name || 'Foundry'
-    this.send(envelope('event', 'chat.message', {
-      messageId: message.id,
-      speaker,
-      text,
-      createdAt: Date.now(),
-    }))
+  onActorContentUpdated(document) {
+    const parent = document?.parent
+    const actor = parent?.documentName === 'Actor' ? parent : parent?.actor
+    if (actor) this.onActorUpdated(actor, {})
+  }
+
+  forwardChat(message) {
+    forwardFoundryChat(this, message)
+    const rolls = extractRolls(message)
+    if (rolls && message.getFlag?.(MODULE_ID, 'fromClient')) {
+      const channel = message.getFlag(MODULE_ID, 'channel') === 'private' ? 'private' : 'party'
+      const connectionId = message.getFlag(MODULE_ID, 'connectionId')
+      const connectionIds = channel === 'private'
+        ? [connectionId].filter(Boolean)
+        : partyConnectionIds(this)
+      this.emit('roll.result', {
+        messageId: message.id,
+        channel,
+        speaker: message.speaker?.alias || 'Someone',
+        ...rolls,
+        targetIds: [],
+      }, { audience: { connectionIds } })
+    }
   }
 }
 
@@ -480,44 +904,72 @@ Hooks.once('init', () => {
     default: 'ws://127.0.0.1:3847/ws',
     onChange: reconnect,
   })
-  game.settings.register(MODULE_ID, 'roomId', {
-    name: 'Bridge room ID',
-    hint: 'Letters, numbers, hyphens, and underscores only.',
+  game.settings.register(MODULE_ID, 'campaignId', {
+    name: 'Bridge campaign ID',
+    hint: 'Created by the remote bridge service.',
     scope: 'world',
     config: true,
     type: String,
     default: 'default',
     onChange: reconnect,
   })
-  game.settings.register(MODULE_ID, 'accessKey', {
-    name: 'Bridge access key',
-    hint: 'Must match BRIDGE_SECRET when the gateway is protected.',
+  game.settings.register(MODULE_ID, 'foundryCredential', {
+    name: 'Foundry campaign credential',
+    hint: 'Private credential returned when this campaign is created.',
     scope: 'world',
     config: true,
     type: String,
     default: '',
     onChange: reconnect,
   })
+  game.settings.register(MODULE_ID, 'inviteUrl', { name: 'Player invite URL', scope: 'world', config: false, type: String, default: '' })
+  installGmPanel(bridge)
+  installAuthoring(bridge, assetRegistry)
 })
 
 Hooks.once('ready', () => {
   if (!game.user?.isGM) return
+  installBridgeChatNotificationFilter()
   bridge.connect()
-  installAuthoring(bridge, assetRegistry)
+  refreshSceneControls()
 
-  Hooks.on('canvasReady', () => bridge.pushSnapshot())
+  Hooks.on('canvasReady', () => {
+    const scene = bridge.activeScene()
+    if (scene) bridge.emit('scene.activated', { sceneId: scene.id, name: scene.name })
+    bridge.pushSnapshot()
+  })
   Hooks.on('createToken', (document) => bridge.onDocumentCreated(document))
   Hooks.on('updateToken', (document, changes) => bridge.onDocumentUpdated(document, changes))
   Hooks.on('deleteToken', (document) => bridge.onDocumentDeleted(document))
   Hooks.on('createTile', (document) => bridge.onDocumentCreated(document))
   Hooks.on('updateTile', (document, changes) => bridge.onDocumentUpdated(document, changes))
   Hooks.on('deleteTile', (document) => bridge.onDocumentDeleted(document))
-  Hooks.on('updateActor', (actor, changes) => bridge.onActorUpdated(actor, changes))
-  Hooks.on('updateScene', (scene, changes) => {
-    if (scene.id === bridge.activeScene()?.id) bridge.emit('scene.updated', { sceneId: scene.id, changes })
+  Hooks.on('createWall', (document) => bridge.onWallChanged(document))
+  Hooks.on('updateWall', (document, changes) => {
+    void changes
+    bridge.onWallChanged(document)
   })
-  Hooks.on('createChatMessage', (message) => bridge.forwardFoundryChat(message))
-
+  Hooks.on('deleteWall', (document) => bridge.onWallDeleted(document))
+  Hooks.on('updateActor', (actor, changes) => bridge.onActorUpdated(actor, changes))
+  Hooks.on('createActiveEffect', (document) => bridge.onActorContentUpdated(document))
+  Hooks.on('updateActiveEffect', (document) => bridge.onActorContentUpdated(document))
+  Hooks.on('deleteActiveEffect', (document) => bridge.onActorContentUpdated(document))
+  Hooks.on('createItem', (document) => bridge.onActorContentUpdated(document))
+  Hooks.on('updateItem', (document) => bridge.onActorContentUpdated(document))
+  Hooks.on('deleteItem', (document) => bridge.onActorContentUpdated(document))
+  Hooks.on('updateScene', (scene, changes) => {
+    if (scene.id === bridge.activeScene()?.id) {
+      bridge.emit('scene.updated', { sceneId: scene.id, changes })
+      if (changes.background || changes.img) bridge.pushSnapshot()
+    }
+  })
+  Hooks.on('createCombat', () => bridge.pushCombat())
+  Hooks.on('updateCombat', () => bridge.pushCombat())
+  Hooks.on('deleteCombat', () => bridge.pushCombat())
+  Hooks.on('combatStart', () => bridge.pushCombat())
+  Hooks.on('combatTurnChange', () => bridge.pushCombat())
+  Hooks.on('createChatMessage', (message) => bridge.forwardChat(message))
 })
 
 window.foundryBridge = bridge
+export { FoundryBridge }

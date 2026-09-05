@@ -2,371 +2,101 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <title>LPC Bridge — test client</title>
-    <style>
-      :root {
-        color-scheme: dark;
-        --bg: #1a1510;
-        --panel: #2a2118;
-        --ink: #f0e0c0;
-        --accent: #c4a574;
-        --muted: #a89070;
-        --ok: #8ecf9a;
-        --bad: #e07060;
-      }
-      * { box-sizing: border-box; }
-      body {
-        margin: 0;
-        min-height: 100dvh;
-        font-family: Georgia, "Times New Roman", serif;
-        background: radial-gradient(ellipse at top, #3d2a1a 0%, var(--bg) 55%, #0f0c09 100%);
-        color: var(--ink);
-        display: flex;
-        flex-direction: column;
-        padding: 1rem;
-        gap: 0.75rem;
-      }
-      h1 { margin: 0; font-size: 1.5rem; font-weight: normal; letter-spacing: 0.02em; }
-      .sub { color: var(--muted); font-size: 0.85rem; margin: 0; font-family: system-ui, sans-serif; }
-      .row { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; }
-      label { font-family: system-ui, sans-serif; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
-      input, select, button, textarea {
-        font: inherit;
-        border-radius: 0.5rem;
-        border: 1px solid #5a4634;
-        background: #0f0c09;
-        color: var(--ink);
-        padding: 0.55rem 0.75rem;
-      }
-      input, select, textarea { flex: 1; min-width: 8rem; }
-      button {
-        background: var(--accent);
-        color: #1a1510;
-        border: none;
-        font-family: system-ui, sans-serif;
-        font-weight: 600;
-        cursor: pointer;
-      }
-      button.secondary { background: transparent; color: var(--accent); border: 1px solid #5a4634; }
-      .panel {
-        background: color-mix(in srgb, var(--panel) 92%, transparent);
-        border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
-        border-radius: 1rem;
-        padding: 0.85rem;
-        display: flex;
-        flex-direction: column;
-        gap: 0.5rem;
-      }
-      #chatFeed, #log {
-        font-family: system-ui, sans-serif;
-        font-size: 0.85rem;
-        height: 22vh;
-        overflow: auto;
-        background: #0f0c09;
-        border-radius: 0.75rem;
-        padding: 0.75rem;
-        border: 1px solid #5a4634;
-      }
-      #log {
-        font-family: ui-monospace, Consolas, monospace;
-        font-size: 0.75rem;
-        height: 18vh;
-        white-space: pre-wrap;
-      }
-      .chat-line { margin: 0 0 0.35rem; line-height: 1.35; }
-      .chat-line .who { color: var(--accent); font-weight: 600; }
-      .chat-line.from-foundry .who { color: var(--ok); }
-      .status { font-family: system-ui, sans-serif; font-size: 0.85rem; }
-      .status.ok { color: var(--ok); }
-      .status.bad { color: var(--bad); }
-      .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem; }
-      #tokenList {
-        font-family: system-ui, sans-serif;
-        font-size: 0.8rem;
-        display: grid;
-        gap: 0.35rem;
-      }
-      .token-row {
-        display: grid;
-        grid-template-columns: 1.4fr 1fr 0.8fr;
-        gap: 0.5rem;
-        padding: 0.4rem 0.55rem;
-        border-radius: 0.5rem;
-        background: #0f0c09;
-        border: 1px solid #5a4634;
-      }
-      .token-row.flash { border-color: var(--ok); }
-      #sceneLabel { font-family: system-ui, sans-serif; color: var(--accent); font-size: 0.9rem; }
-      @media (max-width: 600px) { .grid2 { grid-template-columns: 1fr; } }
-    </style>
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1, user-scalable=no" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="theme-color" content="#1a1510" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <title>Foundry Bridge</title>
   </head>
   <body>
-    <header>
-      <h1>LPC Bridge test client</h1>
-      <p class="sub">Bidirectional 2D LPC: player actions → Foundry, DM changes → this client live.</p>
-    </header>
+    <div id="game"></div>
 
-    <section class="panel">
-      <div class="row">
-        <label>WS URL</label>
-        <input id="url" value="" />
-        <label>Name</label>
-        <input id="name" value="Hero" style="flex: 0.5" />
-        <label>Room</label>
-        <input id="room" value="default" style="flex: 0.4" />
-        <label>Access key</label>
-        <input id="accessKey" type="password" value="" style="flex: 0.4" />
-        <button id="connectBtn" type="button">Connect</button>
-        <button id="disconnectBtn" class="secondary" type="button">Disconnect</button>
-      </div>
-      <div id="status" class="status bad">Disconnected</div>
-      <div id="sceneLabel">Scene: —</div>
-    </section>
+    <aside id="worldContext" hidden>
+      <div class="context-name" id="worldContextName"></div>
+      <div class="context-actions" id="worldContextActions"></div>
+      <span class="context-tail" aria-hidden="true"></span>
+    </aside>
 
-    <section class="panel">
-      <label>Live tokens (from Foundry)</label>
-      <div id="tokenList"><div class="sub">Waiting for state…</div></div>
-    </section>
+    <div id="hud" hidden>
+      <div id="combatBanner" hidden></div>
+      <div id="floatLog"></div>
+      <footer class="hud-bar">
+        <button id="connPip" class="pip bad" type="button" title="Connection">●</button>
+        <div class="vitals">
+          <div class="who" id="heroName">—</div>
+          <div class="hp-row">
+            <div class="hp-track"><div id="hpFill"></div></div>
+            <span id="hpText">HP —</span>
+          </div>
+          <div id="conditions" class="conditions"></div>
+        </div>
+        <div class="hud-actions">
+          <button type="button" data-sheet="act" data-icon="attack"><span class="button-icon" style="--icon-url:url('/icons/attack.svg')"></span>Act</button>
+          <button type="button" data-sheet="bag" data-icon="items"><span class="button-icon" style="--icon-url:url('/icons/items.svg')"></span>Bag</button>
+          <button type="button" data-sheet="chat" data-icon="talk"><span class="button-icon" style="--icon-url:url('/icons/talk.svg')"></span>Chat</button>
+        </div>
+      </footer>
+      <div id="actionBar" style="display: none;" class="action-bar"></div>
+      <p id="chatPeek" class="chat-peek"></p>
+    </div>
 
-    <section class="panel">
-      <label>Chat (both directions)</label>
-      <div id="chatFeed"></div>
-      <div class="row">
-        <input id="chatText" placeholder="Message Foundry…" />
-        <button id="chatBtn" type="button">Send</button>
-      </div>
-    </section>
-
-    <section class="panel">
-      <label>Move token</label>
-      <div class="row">
-        <select id="tokenSelect"><option value="">(first / controlled token)</option></select>
-        <button id="refreshTokens" class="secondary" type="button">Refresh</button>
-      </div>
-      <div class="grid2">
-        <div class="row"><label>X</label><input id="moveX" type="number" value="200" /></div>
-        <div class="row"><label>Y</label><input id="moveY" type="number" value="200" /></div>
-      </div>
-      <button id="moveBtn" type="button">Move token</button>
-    </section>
-
-    <section class="panel">
-      <label>Intent → DM whisper</label>
-      <div class="row">
-        <select id="verb">
-          <option>talk</option>
-          <option>inspect</option>
-          <option>attack</option>
-          <option>use</option>
-          <option>custom</option>
+    <section id="sheet" class="sheet" hidden>
+      <header>
+        <strong id="sheetTitle">Chat</strong>
+        <button type="button" id="sheetClose">Close</button>
+      </header>
+      <div id="sheetBody"></div>
+      <form id="chatForm" class="chat-form" hidden>
+        <select id="chatChannel">
+            <option value="all">Public</option>
+          <option value="party">Party</option>
+          <option value="npc">NPC</option>
         </select>
-        <input id="target" placeholder="Target name" value="Mira" />
+        <input id="chatText" autocomplete="off" placeholder="Say something…" />
+        <button type="submit">Send</button>
+      </form>
+    </section>
+
+    <section id="interact" class="sheet" hidden>
+      <header>
+        <strong id="interactTitle">Interact</strong>
+        <button type="button" id="interactClose">Close</button>
+      </header>
+      <div id="interactBody"></div>
+    </section>
+
+    <section id="connect" class="screen">
+      <div class="card">
+        <h1>Foundry Bridge</h1>
+        <p class="sub">Join the table. Foundry is the world; this is your character.</p>
+        <label>Handle<input id="name" value="Hero" /></label>
+        <label>Room<input id="room" value="default" autocomplete="off" /></label>
+        <label>Character<select id="joinCharacter"><option value="">Connect the DM first</option></select></label>
+        <label class="advanced">Gateway URL<input id="url" /></label>
+        <button type="button" id="connectBtn">Enter the world</button>
+        <p id="connectStatus" class="status">Disconnected</p>
       </div>
-      <textarea id="intentText" rows="2" placeholder="What do you attempt?"></textarea>
-      <button id="intentBtn" type="button">Send intent</button>
     </section>
 
-    <section class="panel">
-      <label>Debug log</label>
-      <div id="log"></div>
+    <section id="claim" class="screen" hidden>
+      <div class="card">
+        <h1>Choose your character</h1>
+        <p class="sub" id="sceneName">Waiting for the scene…</p>
+        <div id="characterList" class="character-list"></div>
+        <button type="button" class="ghost" id="backToConnect">Disconnect</button>
+      </div>
     </section>
 
-    <script>
-      const $ = (id) => document.getElementById(id)
-      const defaultUrl = `ws://${location.hostname || '127.0.0.1'}:${location.port || 3847}/ws`
-      $('url').value = defaultUrl
+    <section id="debug" hidden>
+      <header>
+        <strong>Debug</strong>
+        <button type="button" id="debugClose">Close</button>
+      </header>
+      <pre id="debugLog"></pre>
+    </section>
 
-      let ws = null
-      let tokens = []
-      const seenChat = new Set()
-
-      function envelope(kind, type, payload = {}, extra = {}) {
-        return { v: 1, kind, type, ...extra, payload }
-      }
-
-      function log(line, obj) {
-        const el = $('log')
-        const extra = obj ? '\n' + JSON.stringify(obj, null, 2) : ''
-        el.textContent += `[${new Date().toLocaleTimeString()}] ${line}${extra}\n`
-        el.scrollTop = el.scrollHeight
-      }
-
-      function setStatus(ok, text) {
-        const el = $('status')
-        el.className = 'status ' + (ok ? 'ok' : 'bad')
-        el.textContent = text
-      }
-
-      function addChat(msg) {
-        if (msg.source === 'foundry-confirm') return
-        const key = msg.messageId || `${msg.source}|${msg.speaker}|${msg.text}`
-        if (seenChat.has(key)) return
-        seenChat.add(key)
-        if (seenChat.size > 200) {
-          const first = seenChat.values().next().value
-          seenChat.delete(first)
-        }
-
-        const feed = $('chatFeed')
-        const line = document.createElement('div')
-        line.className = 'chat-line' + (msg.source === 'foundry' ? ' from-foundry' : '')
-        const who = document.createElement('span')
-        who.className = 'who'
-        who.textContent = msg.speaker || '??'
-        line.appendChild(who)
-        line.appendChild(document.createTextNode(' · ' + (msg.text || '')))
-        feed.appendChild(line)
-        feed.scrollTop = feed.scrollHeight
-      }
-
-      function fillTokens(list, scene) {
-        const prev = Object.fromEntries(tokens.map((t) => [t.id, t]))
-        tokens = list || []
-        $('sceneLabel').textContent = 'Scene: ' + (scene || '—')
-
-        const sel = $('tokenSelect')
-        const selected = sel.value
-        sel.innerHTML = '<option value="">(first / controlled token)</option>'
-        for (const t of tokens) {
-          const opt = document.createElement('option')
-          opt.value = t.id
-          opt.textContent = `${t.name} (${Math.round(t.x)}, ${Math.round(t.y)})`
-          sel.appendChild(opt)
-        }
-        if (selected) sel.value = selected
-
-        const box = $('tokenList')
-        if (!tokens.length) {
-          box.innerHTML = '<div class="sub">No tokens on scene</div>'
-          return
-        }
-        box.innerHTML = ''
-        for (const t of tokens) {
-          const row = document.createElement('div')
-          row.className = 'token-row'
-          const old = prev[t.id]
-          if (old && (old.x !== t.x || old.y !== t.y || old.hp !== t.hp)) row.classList.add('flash')
-          const hp =
-            t.hp != null && t.maxHp != null ? `HP ${t.hp}/${t.maxHp}` : t.hp != null ? `HP ${t.hp}` : '—'
-          row.innerHTML = `<span>${escapeHtml(t.name)}</span><span>(${Math.round(t.x)}, ${Math.round(t.y)})</span><span>${hp}</span>`
-          box.appendChild(row)
-        }
-      }
-
-      function applySnapshot(payload) {
-        const mappedTokens = (payload.entities || [])
-          .filter((entity) => entity.documentType === 'Token')
-          .map((entity) => ({
-            id: entity.documentId,
-            name: entity.name,
-            x: entity.transform?.position?.x ?? 0,
-            y: entity.transform?.position?.y ?? 0,
-            hp: entity.actor?.hp ?? null,
-            maxHp: entity.actor?.maxHp ?? null,
-          }))
-        fillTokens(mappedTokens, payload.scene?.name)
-      }
-
-      function applyEntityUpdate(payload) {
-        const entity = payload.entity
-        if (!entity || entity.documentType !== 'Token') return
-        const next = {
-          id: entity.documentId,
-          name: entity.name,
-          x: entity.transform?.position?.x ?? 0,
-          y: entity.transform?.position?.y ?? 0,
-          hp: entity.actor?.hp ?? null,
-          maxHp: entity.actor?.maxHp ?? null,
-        }
-        fillTokens([...tokens.filter((token) => token.id !== next.id), next], $('sceneLabel').textContent.replace(/^Scene: /, ''))
-      }
-
-      function escapeHtml(s) {
-        return String(s)
-          .replace(/&/g, '&amp;')
-          .replace(/</g, '&lt;')
-          .replace(/>/g, '&gt;')
-      }
-
-      function connect() {
-        if (ws) ws.close()
-        const url = $('url').value.trim()
-        ws = new WebSocket(url)
-        setStatus(false, 'Connecting…')
-        log('connecting', { url })
-
-        ws.onopen = () => {
-          setStatus(true, 'Connected — sending hello')
-          ws.send(JSON.stringify(envelope('hello', 'connection.hello', {
-            role: 'player',
-            roomId: $('room').value.trim() || 'default',
-            name: $('name').value.trim() || 'Hero',
-            accessKey: $('accessKey').value,
-            capabilities: ['world.snapshot'],
-          })))
-        }
-        ws.onclose = () => setStatus(false, 'Disconnected')
-        ws.onerror = () => log('socket error')
-        ws.onmessage = (ev) => {
-          let msg
-          try { msg = JSON.parse(ev.data) } catch { log('bad frame', ev.data); return }
-          log('← ' + msg.type, msg.type === 'world.snapshot' ? { revision: msg.payload?.revision } : msg)
-
-          if (msg.type === 'connection.ready' || msg.type === 'room.status') {
-            const status = msg.payload || {}
-            setStatus(status.foundryConnected, status.foundryConnected ? 'Online (Foundry connected)' : 'Online (waiting for Foundry)')
-            if (status.foundryConnected) sendCommand('world.getSnapshot')
-          }
-          if (msg.type === 'connection.error') setStatus(false, `${msg.payload?.code}: ${msg.payload?.message}`)
-          if (msg.type === 'world.snapshot') applySnapshot(msg.payload || {})
-          if (msg.type === 'entity.created' || msg.type === 'entity.updated') applyEntityUpdate(msg.payload || {})
-          if (msg.type === 'entity.deleted') fillTokens(tokens.filter((token) => `Token.${token.id}` !== msg.payload?.entityId), $('sceneLabel').textContent.replace(/^Scene: /, ''))
-          if (msg.type === 'chat.message') addChat({ ...msg.payload, source: 'foundry' })
-        }
-      }
-
-      function send(payload) {
-        if (!ws || ws.readyState !== 1) {
-          log('not connected')
-          return
-        }
-        ws.send(JSON.stringify(payload))
-        if (payload.type !== 'request-state') log('→ ' + payload.type, payload)
-      }
-
-      function sendCommand(type, payload = {}) {
-        send(envelope('command', type, payload, { id: crypto.randomUUID() }))
-      }
-
-      $('connectBtn').onclick = connect
-      $('disconnectBtn').onclick = () => ws?.close()
-      $('chatBtn').onclick = () => {
-        const text = $('chatText').value.trim()
-        if (!text) return
-        sendCommand('chat.send', { text })
-        $('chatText').value = ''
-      }
-      $('moveBtn').onclick = () => {
-        const tokenId = $('tokenSelect').value || undefined
-        sendCommand('token.move', {
-          tokenId,
-          destination: {
-            x: Number($('moveX').value),
-            y: Number($('moveY').value),
-          },
-        })
-      }
-      $('intentBtn').onclick = () => {
-        sendCommand('intent.submit', {
-          verb: $('verb').value,
-          targetEntityId: $('target').value.trim(),
-          text: $('intentText').value.trim(),
-        })
-      }
-      $('refreshTokens').onclick = () => sendCommand('world.getSnapshot')
-
-      connect()
-    </script>
+    <script type="module" src="/src/main.js"></script>
   </body>
 </html>

@@ -1,0 +1,20 @@
+services:
+  bridge:
+    build: .
+    restart: unless-stopped
+    environment:
+      BRIDGE_ACCESS_MODE: ${BRIDGE_ACCESS_MODE:-open}
+      BRIDGE_OWNER_KEY: ${BRIDGE_OWNER_KEY:-}
+      BRIDGE_PUBLIC_ORIGIN: ${BRIDGE_PUBLIC_ORIGIN:?set BRIDGE_PUBLIC_ORIGIN}
+      BRIDGE_ALLOWED_ORIGINS: ${BRIDGE_ALLOWED_ORIGINS:-${BRIDGE_PUBLIC_ORIGIN}}
+    volumes:
+      - bridge-data:/data
+    ports:
+      - "127.0.0.1:3847:3847"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3847/ready"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+volumes:
+  bridge-data:

@@ -1,17 +1,24 @@
 {
   "name": "foundry-bridge",
-  "version": "0.1.0",
+  "version": "0.7.0",
   "private": true,
   "type": "module",
-  "description": "Spike: external 2D LPC player client ↔ Foundry DM panel via WebSocket bridge",
+  "description": "Mobile 2D RPG player client with Foundry VTT as the authoritative engine and DM panel",
   "scripts": {
     "bridge": "node bridge/server.mjs",
-    "client": "node bridge/static-server.mjs",
-    "dev": "node bridge/server.mjs",
+    "dev": "node scripts/dev.mjs",
+    "build": "vite build",
+    "client": "vite",
+    "start": "node bridge/server.mjs",
     "link-module": "node scripts/link-module.mjs",
     "test": "node --test"
+    ,"check": "node --check bridge/server.mjs && node --check client/src/net/bridge.js && node --check client/src/ui/app.js"
   },
   "dependencies": {
+    "phaser": "^3.87.0",
     "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "vite": "^6.3.5"
   }
 }
