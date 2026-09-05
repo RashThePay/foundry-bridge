@@ -1,4 +1,4 @@
-const MODULE_ID = 'lpc-bridge'
+const MODULE_ID = '3d-bridge'
 
 const ASSET_KINDS = ['character', 'creature', 'prop', 'building', 'environment', 'effect', 'other']
 const ENTITY_TYPES = ['actor', 'npc', 'prop', 'door', 'container', 'terrain', 'effect', 'other']

@@ -46,10 +46,10 @@ npm install
 npm run link-module
 ```
 
-The link script creates a Windows junction from `module/lpc-bridge` to:
+The link script creates a Windows junction from `module/3d-bridge` to:
 
 ```text
-%LOCALAPPDATA%\FoundryVTT\Data\modules\lpc-bridge
+%LOCALAPPDATA%\FoundryVTT\Data\modules\3d-bridge
 ```
 
 ### 2. Start the gateway
@@ -118,7 +118,7 @@ The module reads renderer-neutral metadata from Foundry flags.
 Scene:
 
 ```js
-await canvas.scene.setFlag('lpc-bridge', 'world3d', {
+await canvas.scene.setFlag('3d-bridge', 'world3d', {
   environmentId: 'quaternius.medieval-village',
   worldUnitsPerGridSquare: 1,
   lighting: { preset: 'sunset' },
@@ -130,7 +130,7 @@ await canvas.scene.setFlag('lpc-bridge', 'world3d', {
 Token or Tile document:
 
 ```js
-await document.setFlag('lpc-bridge', 'entity3d', {
+await document.setFlag('3d-bridge', 'entity3d', {
   prefabId: 'quaternius.goblin-01',
   entityType: 'actor',
   rotation: { x: 0, y: 180, z: 0 },

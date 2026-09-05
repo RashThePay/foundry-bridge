@@ -1,6 +1,6 @@
 import { AssetRegistry, installAuthoring } from './authoring.mjs'
 
-const MODULE_ID = 'lpc-bridge'
+const MODULE_ID = '3d-bridge'
 const PROTOCOL_VERSION = 1
 
 const DEFAULT_WORLD_3D = Object.freeze({

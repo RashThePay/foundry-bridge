@@ -178,10 +178,10 @@ An entity has a stable Foundry document identity and renderer-neutral metadata:
 }
 ```
 
-Foundry stores 3D authoring metadata in document flags under `lpc-bridge`:
+Foundry stores 3D authoring metadata in document flags under `3d-bridge`:
 
-- Scene: `flags.lpc-bridge.world3d`
-- Token/Tile: `flags.lpc-bridge.entity3d`
+- Scene: `flags.3d-bridge.world3d`
+- Token/Tile: `flags.3d-bridge.entity3d`
 
 Raw GLTF paths, shader uniforms, and engine-specific material configuration do
 not belong in Foundry scene data. Foundry stores logical `prefabId` values; the

@@ -5,14 +5,14 @@ import { fileURLToPath } from 'node:url'
 import { homedir } from 'node:os'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
-const repoModule = join(__dirname, '..', 'module', 'lpc-bridge')
+const repoModule = join(__dirname, '..', 'module', '3d-bridge')
 const foundryModules = join(
   process.env.LOCALAPPDATA || join(homedir(), 'AppData', 'Local'),
   'FoundryVTT',
   'Data',
   'modules'
 )
-const target = join(foundryModules, 'lpc-bridge')
+const target = join(foundryModules, '3d-bridge')
 
 async function main() {
   if (!existsSync(foundryModules)) {
