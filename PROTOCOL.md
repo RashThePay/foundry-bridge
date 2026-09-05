@@ -1,0 +1,205 @@
+# Foundry Bridge Protocol v1
+
+This document defines the renderer-neutral contract between an external game
+client, the WebSocket gateway, and the Foundry module. Foundry is the
+authoritative rules and world editor. External clients render and present that
+world; they do not mutate Foundry documents directly.
+
+## Envelope
+
+Every frame is JSON and uses this envelope:
+
+```json
+{
+  "v": 1,
+  "kind": "command",
+  "type": "token.move",
+  "id": "01J...",
+  "roomId": "default",
+  "payload": {}
+}
+```
+
+| Field | Required | Meaning |
+|---|---:|---|
+| `v` | yes | Protocol version. Currently `1`. |
+| `kind` | yes | `hello`, `command`, `response`, `event`, or `system`. |
+| `type` | yes | Namespaced message type. |
+| `id` | commands | Client-generated request ID used to correlate responses. |
+| `replyTo` | responses | ID of the command being answered. |
+| `roomId` | after hello | Isolates one Foundry world/session from another. |
+| `payload` | yes | Message-specific data. |
+
+Unknown fields must be ignored. Unknown message types must receive a structured
+`UNSUPPORTED_COMMAND` response rather than silently disappearing.
+
+## Connection handshake
+
+The first client frame must be `connection.hello`:
+
+```json
+{
+  "v": 1,
+  "kind": "hello",
+  "type": "connection.hello",
+  "payload": {
+    "role": "foundry",
+    "roomId": "campaign-alpha",
+    "name": "GM",
+    "accessKey": "optional-shared-secret",
+    "capabilities": ["world.snapshot", "token.move", "chat.send"]
+  }
+}
+```
+
+Roles are `foundry`, `player`, and `spectator`. A room accepts one active
+Foundry connection and any number of player/spectator connections. Connecting a
+new Foundry session replaces the old connection in that room only.
+
+The gateway answers with `connection.ready`, containing connection ID, room
+status, and the negotiated protocol version. If a cached authoritative snapshot
+exists, it is sent immediately after the ready event.
+
+`BRIDGE_SECRET` may be configured on the gateway. When configured, all hello
+frames must include the same `accessKey`. This is a deployment-level guard, not
+a substitute for future player identity and actor authorization.
+
+## Commands
+
+Player/spectator commands are routed to the Foundry connection in the same
+room. Foundry returns exactly one response for each command.
+
+Initial command set:
+
+| Type | Payload |
+|---|---|
+| `world.getSnapshot` | `{}` |
+| `token.move` | `{ tokenId, destination: { x, y, z } }` |
+| `chat.send` | `{ text }` |
+| `intent.submit` | `{ targetEntityId?, verb?, text }` |
+| `connection.ping` | `{ sentAt? }` |
+
+Coordinates are renderer-neutral world units. The X/Z plane is horizontal and
+Y is height. By default one Foundry grid square equals one world unit.
+
+Example success:
+
+```json
+{
+  "v": 1,
+  "kind": "response",
+  "type": "token.move.result",
+  "replyTo": "move-42",
+  "payload": { "ok": true, "tokenId": "abc" }
+}
+```
+
+Example failure:
+
+```json
+{
+  "v": 1,
+  "kind": "response",
+  "type": "token.move.result",
+  "replyTo": "move-42",
+  "payload": {
+    "ok": false,
+    "error": { "code": "TOKEN_NOT_FOUND", "message": "Token abc is not in the active scene." }
+  }
+}
+```
+
+## Authoritative snapshot
+
+Foundry emits `world.snapshot` after connecting, when requested, and after a
+scene switch. The gateway caches only the latest snapshot per room so a
+reconnecting client can render immediately while requesting a fresh copy.
+
+```json
+{
+  "v": 1,
+  "kind": "event",
+  "type": "world.snapshot",
+  "roomId": "campaign-alpha",
+  "payload": {
+    "revision": 17,
+    "world": { "id": "world-id", "title": "Campaign", "system": "dnd5e" },
+    "scene": {
+      "id": "scene-id",
+      "name": "Temple Yard",
+      "dimensions": { "width": 40, "depth": 30, "gridSize": 100 },
+      "environment": {
+        "environmentId": "quaternius.fantasy-temple",
+        "skyboxId": null,
+        "lighting": {},
+        "fog": {},
+        "camera": {},
+        "worldUnitsPerGridSquare": 1
+      }
+    },
+    "entities": []
+  }
+}
+```
+
+An entity has a stable Foundry document identity and renderer-neutral metadata:
+
+```json
+{
+  "id": "Token.token-id",
+  "documentType": "Token",
+  "documentId": "token-id",
+  "entityType": "actor",
+  "name": "Goblin",
+  "prefabId": "quaternius.goblin-01",
+  "transform": {
+    "position": { "x": 4, "y": 0, "z": 7 },
+    "rotation": { "x": 0, "y": 180, "z": 0 },
+    "scale": { "x": 1, "y": 1, "z": 1 }
+  },
+  "visible": true,
+  "selectable": true,
+  "interaction": {},
+  "actor": { "id": "actor-id", "hp": 7, "maxHp": 7 }
+}
+```
+
+Foundry stores 3D authoring metadata in document flags under `lpc-bridge`:
+
+- Scene: `flags.lpc-bridge.world3d`
+- Token/Tile: `flags.lpc-bridge.entity3d`
+
+Raw GLTF paths, shader uniforms, and engine-specific material configuration do
+not belong in Foundry scene data. Foundry stores logical `prefabId` values; the
+client resolves them through its own asset registry.
+
+## Incremental events
+
+After a snapshot, clients follow ordered revisions:
+
+- `entity.created`
+- `entity.updated`
+- `entity.deleted`
+- `scene.updated`
+- `scene.activated`
+- `actor.updated`
+- `chat.message`
+
+Every world-changing event includes `payload.revision`. If a client detects a
+revision gap, it must send `world.getSnapshot` and replace local state.
+
+## Authority and permissions
+
+- The gateway authenticates/routs connections but contains no RPG rules.
+- Foundry validates every command and owns all authoritative mutations.
+- A client may never select an arbitrary actor by name as an authorization
+  mechanism. Actor ownership checks will be added when persistent player
+  identities are introduced.
+- Spectators may request snapshots and receive events but may not send gameplay
+  commands.
+
+## Compatibility
+
+The spike protocol (`hello`, `state`, `move`, `chat`, `intent`,
+`request-state`) remains accepted temporarily. New code must emit v1 envelopes.
+Compatibility can be removed after the first real client migrates.

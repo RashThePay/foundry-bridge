@@ -1,89 +1,114 @@
 const MODULE_ID = 'lpc-bridge'
+const PROTOCOL_VERSION = 1
 
-/**
- * Foundry side of the spike.
- * Player → Foundry: chat / move / intent
- * Foundry → players: live token state, scene, public chat, HP snapshots
- */
-class LpcBridge {
+const DEFAULT_WORLD_3D = Object.freeze({
+  environmentId: null,
+  skyboxId: null,
+  worldUnitsPerGridSquare: 1,
+  lighting: {},
+  fog: {},
+  camera: {},
+})
+
+const DEFAULT_ENTITY_3D = Object.freeze({
+  prefabId: null,
+  entityType: null,
+  visible: true,
+  selectable: true,
+  rotation: { x: 0, y: 0, z: 0 },
+  scale: { x: 1, y: 1, z: 1 },
+  heightOffset: 0,
+  interaction: {},
+  controllers: [],
+})
+
+function envelope(kind, type, payload = {}, extra = {}) {
+  return { v: PROTOCOL_VERSION, kind, type, ...extra, payload }
+}
+
+function clone(value) {
+  return value == null ? value : structuredClone(value)
+}
+
+function mergeDefaults(defaults, value) {
+  const target = clone(defaults)
+  for (const [key, next] of Object.entries(value || {})) {
+    const current = target[key]
+    const objects = current && next && typeof current === 'object' && typeof next === 'object'
+      && !Array.isArray(current) && !Array.isArray(next)
+    target[key] = objects ? mergeDefaults(current, next) : clone(next)
+  }
+  return target
+}
+
+class FoundryBridge {
   constructor() {
     this.ws = null
     this.reconnectTimer = null
     this.manualClose = false
-    this.stateTimer = null
-    this.suppressChatEcho = false
-  }
-
-  get url() {
-    return game.settings.get(MODULE_ID, 'bridgeUrl')
+    this.revision = 0
   }
 
   get enabled() {
     return game.settings.get(MODULE_ID, 'enabled')
   }
 
-  connect() {
-    if (!this.enabled) {
-      ui.notifications?.info('LPC Bridge is disabled in module settings.')
-      return
-    }
-    if (!game.user?.isGM) {
-      console.log(`${MODULE_ID} | Only the GM client connects to the bridge.`)
-      return
-    }
+  get url() {
+    return game.settings.get(MODULE_ID, 'bridgeUrl')
+  }
 
+  get roomId() {
+    return game.settings.get(MODULE_ID, 'roomId') || 'default'
+  }
+
+  get accessKey() {
+    return game.settings.get(MODULE_ID, 'accessKey') || ''
+  }
+
+  connect() {
+    if (!this.enabled || !game.user?.isGM) return
     this.manualClose = false
     this.disconnect(false)
 
-    const url = this.url
-    console.log(`${MODULE_ID} | Connecting to ${url}`)
     try {
-      this.ws = new WebSocket(url)
-    } catch (err) {
-      console.error(`${MODULE_ID} | WebSocket create failed`, err)
-      ui.notifications?.error('LPC Bridge: bad WebSocket URL')
+      this.ws = new WebSocket(this.url)
+    } catch (error) {
+      console.error(`${MODULE_ID} | WebSocket creation failed`, error)
+      ui.notifications?.error('Foundry Bridge: invalid WebSocket URL')
       this.scheduleReconnect()
       return
     }
 
     this.ws.addEventListener('open', () => {
-      console.log(`${MODULE_ID} | Connected`)
-      ui.notifications?.info('LPC Bridge connected')
-      this.send({ type: 'hello', role: 'foundry', name: game.user.name })
-      this.schedulePushState(true)
+      this.send(envelope('hello', 'connection.hello', {
+        role: 'foundry',
+        roomId: this.roomId,
+        name: game.user.name,
+        accessKey: this.accessKey,
+        capabilities: [
+          'world.snapshot',
+          'entity.events',
+          'token.move',
+          'chat.send',
+          'intent.submit',
+        ],
+      }))
+      ui.notifications?.info(`Foundry Bridge connected (${this.roomId})`)
     })
-
-    this.ws.addEventListener('message', (ev) => this.onMessage(ev.data))
-
+    this.ws.addEventListener('message', (event) => this.onMessage(event.data))
     this.ws.addEventListener('close', () => {
-      console.log(`${MODULE_ID} | Disconnected`)
       this.ws = null
       if (!this.manualClose && this.enabled) this.scheduleReconnect()
     })
-
-    this.ws.addEventListener('error', (err) => {
-      console.warn(`${MODULE_ID} | Socket error`, err)
-    })
+    this.ws.addEventListener('error', (error) => console.warn(`${MODULE_ID} | Socket error`, error))
   }
 
   disconnect(manual = true) {
     this.manualClose = manual
-    if (this.reconnectTimer) {
-      clearTimeout(this.reconnectTimer)
-      this.reconnectTimer = null
-    }
-    if (this.stateTimer) {
-      clearTimeout(this.stateTimer)
-      this.stateTimer = null
-    }
-    if (this.ws) {
-      try {
-        this.ws.close()
-      } catch {
-        /* ignore */
-      }
-      this.ws = null
-    }
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
+    this.reconnectTimer = null
+    if (this.ws) this.ws.close()
+    this.ws = null
   }
 
   scheduleReconnect() {
@@ -94,289 +119,378 @@ class LpcBridge {
     }, 2500)
   }
 
-  send(payload) {
-    if (this.ws?.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify(payload))
-    }
+  send(message) {
+    if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(message))
   }
 
-  /** Debounce rapid Foundry updates (token drag fires many times). */
-  schedulePushState(immediate = false) {
-    if (immediate) {
-      if (this.stateTimer) {
-        clearTimeout(this.stateTimer)
-        this.stateTimer = null
-      }
-      this.pushState()
-      return
-    }
-    if (this.stateTimer) return
-    this.stateTimer = setTimeout(() => {
-      this.stateTimer = null
-      this.pushState()
-    }, 80)
+  respond(command, payload) {
+    this.send(envelope('response', `${command.type}.result`, { ok: true, ...payload }, { replyTo: command.id }))
+  }
+
+  reject(command, code, message, details) {
+    this.send(envelope('response', `${command.type}.result`, {
+      ok: false,
+      error: { code, message, ...(details ? { details } : {}) },
+    }, { replyTo: command.id }))
+  }
+
+  emit(type, payload = {}) {
+    this.send(envelope('event', type, { revision: ++this.revision, ...payload }))
   }
 
   async onMessage(raw) {
-    let msg
+    let message
     try {
-      msg = JSON.parse(raw)
+      message = JSON.parse(raw)
     } catch {
       return
     }
 
-    switch (msg.type) {
-      case 'welcome':
-      case 'hello-ok':
-      case 'info':
-      case 'ack':
-        return
-      case 'player-join':
-        ui.notifications?.info(`LPC player joined: ${msg.name}`)
-        this.schedulePushState(true)
-        return
-      case 'player-leave':
-        ui.notifications?.warn(`LPC player left: ${msg.name}`)
-        return
-      case 'chat':
-        await this.handleChat(msg)
-        return
-      case 'move':
-        await this.handleMove(msg)
-        return
-      case 'intent':
-        await this.handleIntent(msg)
-        return
-      case 'ping':
-      case 'request-state':
-        this.schedulePushState(true)
-        this.send({ type: 'pong' })
-        return
-      default:
-        console.log(`${MODULE_ID} | Unhandled`, msg)
+    if (message.kind !== 'command') {
+      if (message.type === 'connection.ready') this.pushSnapshot()
+      return
     }
-  }
 
-  async handleChat(msg) {
-    const text = String(msg.text || '').trim()
-    if (!text) return
-    const speakerName = String(msg.speaker || msg.player || 'Player').slice(0, 60)
-
-    this.suppressChatEcho = true
     try {
-      await ChatMessage.create({
-        content: text,
-        speaker: { alias: `[LPC] ${speakerName}` },
-        type: CONST.CHAT_MESSAGE_STYLES?.OTHER ?? CONST.CHAT_MESSAGE_TYPES?.OTHER ?? 0,
-        flags: {
-          [MODULE_ID]: { fromClient: true, speaker: speakerName },
-        },
-      })
-    } finally {
-      // Allow the createChatMessage hook to see the flag; clear on next tick.
-      setTimeout(() => {
-        this.suppressChatEcho = false
-      }, 0)
+      switch (message.type) {
+        case 'world.getSnapshot':
+          this.pushSnapshot()
+          this.respond(message, { revision: this.revision })
+          return
+        case 'token.move':
+          await this.handleTokenMove(message)
+          return
+        case 'chat.send':
+          await this.handleChat(message)
+          return
+        case 'intent.submit':
+          await this.handleIntent(message)
+          return
+        case 'connection.ping':
+          this.respond(message, { pong: true, receivedAt: Date.now() })
+          return
+        default:
+          this.reject(message, 'UNSUPPORTED_COMMAND', `Unsupported command: ${message.type}`)
+      }
+    } catch (error) {
+      console.error(`${MODULE_ID} | Command failed`, message, error)
+      this.reject(message, 'INTERNAL_ERROR', error?.message || 'The Foundry command failed.')
     }
-
-    // Client already got a local echo from the bridge; Foundry confirm is optional.
-    this.send({
-      type: 'chat',
-      text,
-      speaker: speakerName,
-      source: 'foundry-confirm',
-    })
   }
 
-  async handleMove(msg) {
-    const x = Number(msg.x)
-    const y = Number(msg.y)
-    if (!Number.isFinite(x) || !Number.isFinite(y)) {
-      this.send({ type: 'error', message: 'move requires numeric x,y' })
-      return
-    }
-
-    const token = this.findToken(msg.tokenId, msg.tokenName, msg.player)
-    if (!token) {
-      this.send({
-        type: 'error',
-        message: 'No matching token on the current scene. Place a token or pass tokenName.',
-      })
-      ui.notifications?.warn('LPC Bridge: move failed — no token matched')
-      return
-    }
-
-    await token.document.update({ x, y })
-    // updateToken hook will push state to all clients
-    this.send({
-      type: 'ack',
-      for: 'move',
-      tokenId: token.id,
-      tokenName: token.name,
-      x,
-      y,
-    })
+  activeScene() {
+    return canvas?.scene || game.scenes?.active || null
   }
 
-  async handleIntent(msg) {
-    const player = msg.player || 'Player'
-    const verb = msg.verb || 'custom'
-    const target = msg.target || 'something'
-    const text = msg.text || ''
-
-    await ChatMessage.create({
-      content: `<div class="lpc-intent"><strong>${foundry.utils.escapeHTML(player)}</strong> wants to <em>${foundry.utils.escapeHTML(verb)}</em> <strong>${foundry.utils.escapeHTML(target)}</strong>${text ? `: ${foundry.utils.escapeHTML(text)}` : ''}</div>`,
-      speaker: { alias: 'LPC Intent' },
-      whisper: ChatMessage.getWhisperRecipients('GM').map((u) => u.id),
-      flags: {
-        [MODULE_ID]: { fromClient: true, intent: true },
-      },
-    })
-
-    ui.notifications?.info(`LPC intent from ${player}: ${verb} ${target}`)
-    this.send({ type: 'ack', for: 'intent' })
+  world3d(scene) {
+    return mergeDefaults(DEFAULT_WORLD_3D, scene?.getFlag(MODULE_ID, 'world3d'))
   }
 
-  findToken(tokenId, tokenName, playerName) {
-    const tokens = canvas?.tokens?.placeables || []
-    if (tokenId) {
-      const byId = tokens.find((t) => t.id === tokenId || t.document?.id === tokenId)
-      if (byId) return byId
-    }
-    const nameCandidates = [tokenName, playerName].filter(Boolean).map((n) => String(n).toLowerCase())
-    for (const needle of nameCandidates) {
-      const byName = tokens.find((t) => t.name?.toLowerCase() === needle)
-      if (byName) return byName
-    }
-    const controlled = canvas?.tokens?.controlled?.[0]
-    if (controlled) return controlled
-    return tokens[0] || null
+  entity3d(document) {
+    return mergeDefaults(DEFAULT_ENTITY_3D, document?.getFlag(MODULE_ID, 'entity3d'))
   }
 
-  tokenPayload(t) {
-    const actor = t.actor
+  gridSize(scene) {
+    return Number(scene?.grid?.size || scene?.grid?.sizeX || 100) || 100
+  }
+
+  worldUnits(scene) {
+    return Number(this.world3d(scene).worldUnitsPerGridSquare) || 1
+  }
+
+  canvasToWorld(scene, x, y, elevation = 0, heightOffset = 0) {
+    const factor = this.worldUnits(scene) / this.gridSize(scene)
+    return {
+      x: Number(x || 0) * factor,
+      y: Number(elevation || 0) + Number(heightOffset || 0),
+      z: Number(y || 0) * factor,
+    }
+  }
+
+  worldToCanvas(scene, position) {
+    const factor = this.gridSize(scene) / this.worldUnits(scene)
+    return {
+      x: Number(position.x) * factor,
+      y: Number(position.z) * factor,
+      elevation: Number(position.y || 0),
+    }
+  }
+
+  tokenEntity(document) {
+    const scene = document.parent
+    const config = this.entity3d(document)
+    const actor = document.actor
     const hp = actor?.system?.attributes?.hp
     return {
-      id: t.id,
-      name: t.name,
-      x: t.document.x,
-      y: t.document.y,
-      actorId: actor?.id || null,
-      hp: hp?.value ?? null,
-      maxHp: hp?.max ?? null,
-      hidden: !!t.document.hidden,
-      disposition: t.document.disposition,
+      id: `Token.${document.id}`,
+      documentType: 'Token',
+      documentId: document.id,
+      entityType: config.entityType || (actor ? 'actor' : 'token'),
+      name: document.name,
+      prefabId: config.prefabId,
+      transform: {
+        position: this.canvasToWorld(scene, document.x, document.y, document.elevation, config.heightOffset),
+        rotation: config.rotation,
+        scale: config.scale,
+      },
+      visible: config.visible !== false && !document.hidden,
+      selectable: config.selectable !== false,
+      interaction: config.interaction,
+      disposition: document.disposition,
+      actor: actor ? {
+        id: actor.id,
+        hp: hp?.value ?? null,
+        maxHp: hp?.max ?? null,
+      } : null,
     }
   }
 
-  pushState() {
-    const tokens = (canvas?.tokens?.placeables || []).map((t) => this.tokenPayload(t))
+  tileEntity(document) {
+    const scene = document.parent
+    const config = this.entity3d(document)
+    if (!config.prefabId) return null
+    return {
+      id: `Tile.${document.id}`,
+      documentType: 'Tile',
+      documentId: document.id,
+      entityType: config.entityType || 'prop',
+      name: document.texture?.src?.split('/').pop() || 'World object',
+      prefabId: config.prefabId,
+      transform: {
+        position: this.canvasToWorld(scene, document.x, document.y, document.elevation, config.heightOffset),
+        rotation: config.rotation,
+        scale: config.scale,
+      },
+      visible: config.visible !== false && !document.hidden,
+      selectable: config.selectable !== false,
+      interaction: config.interaction,
+    }
+  }
 
-    this.send({
-      type: 'state',
-      scene: canvas?.scene?.name || null,
-      sceneId: canvas?.scene?.id || null,
-      tokens,
-      foundryConnected: true,
-      at: Date.now(),
+  documentEntity(document) {
+    if (document?.documentName === 'Token') return this.tokenEntity(document)
+    if (document?.documentName === 'Tile') return this.tileEntity(document)
+    return null
+  }
+
+  snapshot() {
+    const scene = this.activeScene()
+    const environment = this.world3d(scene)
+    const entities = scene
+      ? [
+          ...scene.tokens.map((document) => this.tokenEntity(document)),
+          ...scene.tiles.map((document) => this.tileEntity(document)).filter(Boolean),
+        ]
+      : []
+    return {
+      revision: ++this.revision,
+      generatedAt: Date.now(),
+      world: {
+        id: game.world?.id || null,
+        title: game.world?.title || null,
+        system: game.system?.id || null,
+        systemVersion: game.system?.version || null,
+      },
+      scene: scene ? {
+        id: scene.id,
+        name: scene.name,
+        active: !!scene.active,
+        dimensions: {
+          width: scene.width / this.gridSize(scene) * this.worldUnits(scene),
+          depth: scene.height / this.gridSize(scene) * this.worldUnits(scene),
+          gridSize: this.gridSize(scene),
+        },
+        environment,
+      } : null,
+      entities,
+    }
+  }
+
+  pushSnapshot() {
+    this.send(envelope('event', 'world.snapshot', this.snapshot()))
+  }
+
+  canControl(document, source) {
+    const controllers = this.entity3d(document).controllers || []
+    if (!controllers.length) return true
+    return controllers.includes(source?.connectionId) || controllers.includes(source?.name)
+  }
+
+  async handleTokenMove(command) {
+    const { tokenId, destination } = command.payload || {}
+    if (!tokenId || !destination || ![destination.x, destination.z].every(Number.isFinite)) {
+      this.reject(command, 'INVALID_ARGUMENT', 'tokenId and finite destination.x/destination.z are required.')
+      return
+    }
+    const scene = this.activeScene()
+    const document = scene?.tokens?.get(tokenId)
+    if (!document) {
+      this.reject(command, 'TOKEN_NOT_FOUND', `Token ${tokenId} is not in the active scene.`)
+      return
+    }
+    if (!this.canControl(document, command.source)) {
+      this.reject(command, 'PERMISSION_DENIED', 'This client may not control that token.')
+      return
+    }
+    const position = this.worldToCanvas(scene, destination)
+    await document.update(position)
+    this.respond(command, { tokenId, destination })
+  }
+
+  async handleChat(command) {
+    const text = String(command.payload?.text || '').trim()
+    if (!text) {
+      this.reject(command, 'INVALID_ARGUMENT', 'Chat text is required.')
+      return
+    }
+    const speaker = String(command.source?.name || 'Player').slice(0, 60)
+    const created = await ChatMessage.create({
+      content: foundry.utils.escapeHTML(text),
+      speaker: { alias: `[Bridge] ${speaker}` },
+      type: CONST.CHAT_MESSAGE_STYLES?.OTHER ?? CONST.CHAT_MESSAGE_TYPES?.OTHER ?? 0,
+      flags: { [MODULE_ID]: { fromClient: true, connectionId: command.source?.connectionId } },
+    })
+    this.respond(command, { messageId: created?.id || null })
+  }
+
+  async handleIntent(command) {
+    const payload = command.payload || {}
+    const text = String(payload.text || '').trim()
+    if (!text) {
+      this.reject(command, 'INVALID_ARGUMENT', 'Intent text is required.')
+      return
+    }
+    const player = foundry.utils.escapeHTML(command.source?.name || 'Player')
+    const verb = foundry.utils.escapeHTML(payload.verb || 'do something')
+    const target = foundry.utils.escapeHTML(payload.targetEntityId || 'the world')
+    const created = await ChatMessage.create({
+      content: `<div class="lpc-intent"><strong>${player}</strong> wants to <em>${verb}</em> <strong>${target}</strong>: ${foundry.utils.escapeHTML(text)}</div>`,
+      speaker: { alias: 'Player Intent' },
+      whisper: ChatMessage.getWhisperRecipients('GM').map((user) => user.id),
+      flags: { [MODULE_ID]: { fromClient: true, intent: true, payload: clone(payload) } },
+    })
+    ui.notifications?.info(`Intent from ${command.source?.name || 'Player'}`)
+    this.respond(command, { messageId: created?.id || null })
+  }
+
+  onDocumentCreated(document) {
+    const entity = this.documentEntity(document)
+    if (entity && document.parent?.id === this.activeScene()?.id) this.emit('entity.created', { entity })
+  }
+
+  onDocumentUpdated(document, changes) {
+    const entity = this.documentEntity(document)
+    if (entity && document.parent?.id === this.activeScene()?.id) this.emit('entity.updated', { entity, changes })
+  }
+
+  onDocumentDeleted(document) {
+    if (document.parent?.id !== this.activeScene()?.id) return
+    this.emit('entity.deleted', { entityId: `${document.documentName}.${document.id}` })
+  }
+
+  onActorUpdated(actor, changes) {
+    const scene = this.activeScene()
+    if (!scene) return
+    const tokenIds = scene.tokens.filter((token) => token.actorId === actor.id).map((token) => token.id)
+    if (tokenIds.length) this.emit('actor.updated', {
+      actorId: actor.id,
+      tokenIds,
+      changes,
+      hp: actor.system?.attributes?.hp?.value ?? null,
+      maxHp: actor.system?.attributes?.hp?.max ?? null,
     })
   }
 
-  /** Forward Foundry-originated public chat to external clients. */
   forwardFoundryChat(message) {
-    if (!message) return
-    if (message.getFlag?.(MODULE_ID, 'fromClient')) return
-    if (message.whisper?.length) return // keep GM whispers private
-
-    const speaker =
-      message.speaker?.alias ||
-      game.actors?.get(message.speaker?.actor)?.name ||
-      game.users?.get(message.author?.id || message.user)?.name ||
-      'Foundry'
-
-    const text = this.plainText(message.content || '')
+    if (!message || message.getFlag?.(MODULE_ID, 'fromClient') || message.whisper?.length) return
+    const container = document.createElement('div')
+    container.innerHTML = message.content || ''
+    const text = (container.textContent || '').replace(/\s+/g, ' ').trim()
     if (!text) return
-
-    this.send({
-      type: 'chat',
-      text,
-      speaker,
-      source: 'foundry',
+    const speaker = message.speaker?.alias || game.users?.get(message.author?.id || message.user)?.name || 'Foundry'
+    this.send(envelope('event', 'chat.message', {
       messageId: message.id,
-    })
-  }
-
-  plainText(html) {
-    const tmp = document.createElement('div')
-    tmp.innerHTML = html
-    return (tmp.textContent || tmp.innerText || '').replace(/\s+/g, ' ').trim()
+      speaker,
+      text,
+      createdAt: Date.now(),
+    }))
   }
 }
 
-const bridge = new LpcBridge()
+const bridge = new FoundryBridge()
 
 Hooks.once('init', () => {
+  const reconnect = () => bridge.enabled && bridge.connect()
   game.settings.register(MODULE_ID, 'enabled', {
     name: 'Enable bridge',
-    hint: 'GM client connects to the external WebSocket bridge when a world loads.',
+    hint: 'Connect the active GM client to the external game gateway.',
     scope: 'world',
     config: true,
     type: Boolean,
     default: true,
-    onChange: (enabled) => {
-      if (enabled) bridge.connect()
-      else bridge.disconnect()
-    },
+    onChange: (enabled) => enabled ? bridge.connect() : bridge.disconnect(),
   })
-
   game.settings.register(MODULE_ID, 'bridgeUrl', {
     name: 'Bridge WebSocket URL',
-    hint: 'Default ws://127.0.0.1:3847/ws — run `npm run bridge` in foundry-bridge.',
     scope: 'world',
     config: true,
     type: String,
     default: 'ws://127.0.0.1:3847/ws',
-    onChange: () => {
-      if (bridge.enabled) bridge.connect()
-    },
+    onChange: reconnect,
+  })
+  game.settings.register(MODULE_ID, 'roomId', {
+    name: 'Bridge room ID',
+    hint: 'Letters, numbers, hyphens, and underscores only.',
+    scope: 'world',
+    config: true,
+    type: String,
+    default: 'default',
+    onChange: reconnect,
+  })
+  game.settings.register(MODULE_ID, 'accessKey', {
+    name: 'Bridge access key',
+    hint: 'Must match BRIDGE_SECRET when the gateway is protected.',
+    scope: 'world',
+    config: true,
+    type: String,
+    default: '',
+    onChange: reconnect,
   })
 })
 
 Hooks.once('ready', () => {
-  if (!game.user.isGM) return
+  if (!game.user?.isGM) return
+  bridge.connect()
+
+  Hooks.on('canvasReady', () => bridge.pushSnapshot())
+  Hooks.on('createToken', (document) => bridge.onDocumentCreated(document))
+  Hooks.on('updateToken', (document, changes) => bridge.onDocumentUpdated(document, changes))
+  Hooks.on('deleteToken', (document) => bridge.onDocumentDeleted(document))
+  Hooks.on('createTile', (document) => bridge.onDocumentCreated(document))
+  Hooks.on('updateTile', (document, changes) => bridge.onDocumentUpdated(document, changes))
+  Hooks.on('deleteTile', (document) => bridge.onDocumentDeleted(document))
+  Hooks.on('updateActor', (actor, changes) => bridge.onActorUpdated(actor, changes))
+  Hooks.on('updateScene', (scene, changes) => {
+    if (scene.id === bridge.activeScene()?.id) bridge.emit('scene.updated', { sceneId: scene.id, changes })
+  })
+  Hooks.on('createChatMessage', (message) => bridge.forwardFoundryChat(message))
 
   Hooks.on('getSceneControlButtons', (controls) => {
-    const tokenControls = Array.isArray(controls)
-      ? controls.find((c) => c.name === 'token')
-      : controls.tokens
+    const tokenControls = Array.isArray(controls) ? controls.find((control) => control.name === 'token') : controls.tokens
     if (!tokenControls) return
-    const tools = tokenControls.tools
     const tool = {
       name: 'lpc-bridge',
-      title: 'LPC Bridge: reconnect + push state',
+      title: 'Foundry Bridge: reconnect and push snapshot',
       icon: 'fas fa-plug',
       button: true,
       onClick: () => {
         bridge.connect()
-        setTimeout(() => bridge.pushState(), 400)
+        setTimeout(() => bridge.pushSnapshot(), 400)
       },
     }
-    if (Array.isArray(tools)) tools.push(tool)
-    else if (tools && typeof tools === 'object') tools['lpc-bridge'] = tool
-  })
-
-  bridge.connect()
-
-  // --- Foundry → clients ---
-  Hooks.on('canvasReady', () => bridge.schedulePushState(true))
-  Hooks.on('createToken', () => bridge.schedulePushState(true))
-  Hooks.on('deleteToken', () => bridge.schedulePushState(true))
-  Hooks.on('updateToken', () => bridge.schedulePushState(false))
-  Hooks.on('updateActor', () => bridge.schedulePushState(false))
-
-  Hooks.on('createChatMessage', (message) => {
-    bridge.forwardFoundryChat(message)
+    if (Array.isArray(tokenControls.tools)) tokenControls.tools.push(tool)
+    else tokenControls.tools[tool.name] = tool
   })
 })
 
-window.lpcBridge = bridge
+window.foundryBridge = bridge

@@ -8,7 +8,8 @@
     "bridge": "node bridge/server.mjs",
     "client": "node bridge/static-server.mjs",
     "dev": "node bridge/server.mjs",
-    "link-module": "node scripts/link-module.mjs"
+    "link-module": "node scripts/link-module.mjs",
+    "test": "node --test"
   },
   "dependencies": {
     "ws": "^8.18.3"
