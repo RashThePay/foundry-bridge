@@ -30,6 +30,9 @@ not expose renderer-specific paths or Foundry document operations.
 - Renderer-neutral X/Y/Z transforms and logical prefab IDs
 - Token movement, public chat, freeform player intents, and resync
 - Player and spectator roles
+- Persistent 3D asset registry with model/preview file picking
+- Foundry toolbar authoring tools for Scene settings and selected entities
+- One-click prefab placement as a Foundry Tile proxy
 - Temporary compatibility for the original spike messages
 
 The full contract is documented in [PROTOCOL.md](PROTOCOL.md).
@@ -91,7 +94,24 @@ The test client can:
 - submit a freeform intent as a GM whisper
 - request an authoritative resync
 
-## 3D authoring data in Foundry
+## 3D authoring in Foundry
+
+Four tools are added to Foundry's Token controls:
+
+- **3D Asset Registry** registers GLB/GLTF models, previews, categories,
+  animation sets, colliders, tags, and default scales.
+- **3D Scene Settings** configures the environment prefab, world scale,
+  lighting, fog, skybox, and default camera.
+- **Selected Entity 3D Inspector** assigns a prefab and transform to the
+  currently controlled Token or Tile, along with visibility, selection,
+  freeform interaction, and external-controller bindings.
+- **Reconnect and push 3D world** sends a complete authoritative snapshot.
+
+The Asset Registry can also place a prefab directly in the active Scene. It
+creates a normal Foundry Tile as the editable 2D proxy while the external client
+renders its registered 3D model.
+
+### Stored data
 
 The module reads renderer-neutral metadata from Foundry flags.
 
@@ -122,9 +142,9 @@ await document.setFlag('lpc-bridge', 'entity3d', {
 })
 ```
 
-These console examples expose the real persisted data model. A dedicated
-Foundry scene/prefab authoring UI is the next product layer; clients will not
-need to change when that UI is introduced.
+These examples expose the same persisted data model written by the authoring
+UI. Clients receive the asset registry once per world snapshot and entities
+refer to assets through stable logical IDs.
 
 ## Development
 
@@ -138,13 +158,13 @@ be exercised in Foundry v12/v13 because it depends on the live Foundry runtime.
 
 ## Next product layer
 
-The next implementation area is the actual Foundry authoring experience:
+The next implementation area is a real external 3D editor/runtime client:
 
-- asset registry with logical prefab IDs and previews
-- scene environment configuration
-- selected Token/Tile 3D inspector
-- create/update/delete prefab placement from the Foundry canvas
-- live preview/open-scene commands for the external client
+- load the Scene environment and registered GLB assets
+- render and live-update Token/Tile entities
+- camera and object selection
+- live preview/open-scene commands from Foundry
+- transform feedback from the 3D client when useful
 - persistent player identity and actor-control bindings
 
 That layer will write the flags already represented by Protocol v1 rather than

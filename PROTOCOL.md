@@ -137,6 +137,20 @@ reconnecting client can render immediately while requesting a fresh copy.
         "worldUnitsPerGridSquare": 1
       }
     },
+    "assets": [
+      {
+        "id": "quaternius.goblin-01",
+        "name": "Goblin 01",
+        "kind": "creature",
+        "modelUrl": "assets/models/goblin.glb",
+        "previewUrl": "assets/previews/goblin.webp",
+        "defaultEntityType": "actor",
+        "defaultScale": { "x": 1, "y": 1, "z": 1 },
+        "animationSetId": "quaternius.humanoid",
+        "collider": { "type": "capsule" },
+        "tags": ["goblin", "humanoid"]
+      }
+    ],
     "entities": []
   }
 }
@@ -171,7 +185,8 @@ Foundry stores 3D authoring metadata in document flags under `lpc-bridge`:
 
 Raw GLTF paths, shader uniforms, and engine-specific material configuration do
 not belong in Foundry scene data. Foundry stores logical `prefabId` values; the
-client resolves them through its own asset registry.
+client resolves them through the snapshot's asset registry. Model URLs live in
+that registry rather than being repeated on each Scene entity.
 
 ## Incremental events
 
