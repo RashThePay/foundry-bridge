@@ -1,73 +1,151 @@
-# Foundry Bridge (spike)
+# Foundry Bridge
 
-External **player client** ↔ **WebSocket bridge** ↔ **Foundry module** (DM panel + dnd5e).
+Foundry Bridge turns Foundry VTT into the authoritative rules engine, world
+editor, and GM control plane for an external game client.
 
-Players never open Foundry. Foundry stays authoritative for tokens, chat, and (later) rolls.
+```text
+External 2D/3D clients
+        ↕ WebSocket Protocol v1
+Room-aware gateway
+        ↕
+Foundry module
+  ├─ scene/world state
+  ├─ actor and token state
+  ├─ rules and rolls
+  └─ GM authoring/control
+```
 
-## Quick test
+Players do not need to open Foundry. The external client can be implemented in
+Godot, Three.js, Phaser, or another renderer because the bridge protocol does
+not expose renderer-specific paths or Foundry document operations.
 
-### 1. Install deps + link module
+## Current foundation
+
+- Versioned JSON protocol with commands, responses, events, and structured errors
+- Multiple isolated rooms on one gateway
+- Optional deployment access key through `BRIDGE_SECRET`
+- Foundry-authoritative command handling
+- Cached world snapshot for reconnecting clients
+- Revisioned incremental entity/actor/scene events
+- Renderer-neutral X/Y/Z transforms and logical prefab IDs
+- Token movement, public chat, freeform player intents, and resync
+- Player and spectator roles
+- Temporary compatibility for the original spike messages
+
+The full contract is documented in [PROTOCOL.md](PROTOCOL.md).
+
+## Local setup
+
+### 1. Install and link the module
 
 ```bash
 npm install
 npm run link-module
 ```
 
-This junctions `module/lpc-bridge` into:
+The link script creates a Windows junction from `module/lpc-bridge` to:
 
-`%LOCALAPPDATA%\FoundryVTT\Data\modules\lpc-bridge`
+```text
+%LOCALAPPDATA%\FoundryVTT\Data\modules\lpc-bridge
+```
 
-### 2. Start the bridge
+### 2. Start the gateway
 
 ```bash
 npm run bridge
 ```
 
-- Test client: http://localhost:3847/
+- Test client: `http://localhost:3847/`
 - WebSocket: `ws://localhost:3847/ws`
+- Health/status: `http://localhost:3847/health`
 
-### 3. Enable in Foundry
+To protect a deployed gateway with a shared key:
 
-1. Launch Foundry, open a world (ideally with a scene + at least one token)
-2. **Settings → Manage Modules** → enable **LPC Bridge (spike)**
-3. Reload the world as GM
-4. You should see “LPC Bridge connected”
+```bash
+BRIDGE_SECRET=replace-me npm run bridge
+```
 
-Module setting default URL: `ws://127.0.0.1:3847/ws`
+Set the same value in the Foundry module and external client. This protects the
+gateway during personal/private use; persistent player identity and per-actor
+authorization remain separate future work.
 
-### 4. Prove the pipe
+### 3. Enable the Foundry module
 
-In the browser test client:
+1. Open a Foundry world as GM.
+2. Enable **Foundry Bridge** in Manage Modules.
+3. Configure the WebSocket URL, room ID, and optional access key in Module Settings.
+4. Reload the world.
 
-1. Connect (auto on load)
-2. **Send chat** → appears in Foundry chat as `[LPC] Hero`
-3. Set X/Y and **Move token** → token jumps on the current scene
-4. **Send intent** → GM whisper with the proposed action
+Only the active GM client connects to the gateway. The toolbar plug button
+reconnects and pushes a fresh authoritative snapshot.
 
-**Foundry → client (live):**
+### 4. Use the test client
 
-1. Drag a token in Foundry → client token list updates (x/y flash)
-2. Type in Foundry public chat → appears in the client chat feed
-3. Change actor HP → client shows updated HP
-4. Change scene → client scene label + token list refresh
+Open `http://localhost:3847/`, enter the same room ID/access key, and connect.
+The test client can:
 
-Token tools also get a plug button: reconnect + push token list to clients.
+- receive the current scene and token snapshot
+- follow token and actor updates
+- move a token using world coordinates
+- send public chat into Foundry
+- submit a freeform intent as a GM whisper
+- request an authoritative resync
 
-## Protocol (JSON)
+## 3D authoring data in Foundry
 
-| type | from | meaning |
-|------|------|---------|
-| `hello` | both | `{ role: 'foundry' \| 'player', name? }` |
-| `chat` | player | `{ text }` → Foundry `ChatMessage` |
-| `move` | player | `{ tokenId?, tokenName?, x, y }` → `TokenDocument#update` |
-| `intent` | player | `{ verb, target?, text? }` → GM whisper |
-| `state` | foundry | scene + tokens (x/y/hp) pushed on DM changes |
-| `chat` (source=`foundry`) | foundry | public Foundry chat → clients |
-| `request-state` | player | ask Foundry to re-push `state` |
+The module reads renderer-neutral metadata from Foundry flags.
 
-## Next (not in spike)
+Scene:
 
-- Auth / room codes
-- LPC canvas client instead of this HTML form
-- Intent queue UI in Foundry
-- Call dnd5e roll helpers on resolve
+```js
+await canvas.scene.setFlag('lpc-bridge', 'world3d', {
+  environmentId: 'quaternius.medieval-village',
+  worldUnitsPerGridSquare: 1,
+  lighting: { preset: 'sunset' },
+  fog: { enabled: false },
+  camera: { preset: 'isometric' },
+})
+```
+
+Token or Tile document:
+
+```js
+await document.setFlag('lpc-bridge', 'entity3d', {
+  prefabId: 'quaternius.goblin-01',
+  entityType: 'actor',
+  rotation: { x: 0, y: 180, z: 0 },
+  scale: { x: 1, y: 1, z: 1 },
+  heightOffset: 0,
+  selectable: true,
+  interaction: { freeform: true },
+  controllers: [],
+})
+```
+
+These console examples expose the real persisted data model. A dedicated
+Foundry scene/prefab authoring UI is the next product layer; clients will not
+need to change when that UI is introduced.
+
+## Development
+
+```bash
+npm test
+```
+
+Gateway tests cover room isolation, request/response correlation, cached
+snapshot replay, and access-key rejection. The Foundry module must additionally
+be exercised in Foundry v12/v13 because it depends on the live Foundry runtime.
+
+## Next product layer
+
+The next implementation area is the actual Foundry authoring experience:
+
+- asset registry with logical prefab IDs and previews
+- scene environment configuration
+- selected Token/Tile 3D inspector
+- create/update/delete prefab placement from the Foundry canvas
+- live preview/open-scene commands for the external client
+- persistent player identity and actor-control bindings
+
+That layer will write the flags already represented by Protocol v1 rather than
+introducing a second scene format.
