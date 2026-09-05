@@ -36,6 +36,21 @@ function slug(value) {
     .replace(/^-+|-+$/g, '')
 }
 
+function fileStem(path) {
+  const base = String(path || '').split(/[\\/]/).pop() || ''
+  return base.replace(/\.[^.]+$/, '').trim()
+}
+
+/** Editable defaults derived from a model path, e.g. `models/Goblin_01.glb` → id/name. */
+function fieldsFromModelPath(path) {
+  const stem = fileStem(path)
+  if (!stem) return { id: '', name: '' }
+  return {
+    id: slug(stem),
+    name: stem.replace(/[._-]+/g, ' ').replace(/\s+/g, ' ').trim(),
+  }
+}
+
 function splitList(value) {
   return String(value || '').split(',').map((item) => item.trim()).filter(Boolean)
 }
@@ -57,11 +72,12 @@ function notifyError(error) {
   ui.notifications?.error(error?.message || 'Foundry Bridge authoring action failed.')
 }
 
-function bindFilePickers(html) {
+function bindFilePickers(html, { onPicked } = {}) {
   const root = formRoot(html)
   root.querySelectorAll('[data-file-target]').forEach((button) => {
     button.addEventListener('click', () => {
-      const target = root.querySelector(`[name="${button.dataset.fileTarget}"]`)
+      const field = button.dataset.fileTarget
+      const target = root.querySelector(`[name="${field}"]`)
       const Picker = foundry.applications?.apps?.FilePicker?.implementation || globalThis.FilePicker
       if (!Picker || !target) {
         ui.notifications?.warn('Foundry File Picker is unavailable.')
@@ -70,10 +86,57 @@ function bindFilePickers(html) {
       new Picker({
         type: button.dataset.fileType || 'any',
         current: target.value,
-        callback: (path) => { target.value = path },
+        callback: (path) => {
+          target.value = path
+          target.dispatchEvent(new Event('change', { bubbles: true }))
+          onPicked?.(field, path)
+        },
       }).browse()
     })
   })
+}
+
+/**
+ * Keep Asset ID / Name in sync with the model filename until the GM edits them.
+ * Empty fields always accept a new suggestion; manually typed values are left alone.
+ */
+function bindAssetIdentityFromModel(html) {
+  const root = formRoot(html)
+  const idInput = root.querySelector('[name="id"]')
+  const nameInput = root.querySelector('[name="name"]')
+  const modelInput = root.querySelector('[name="modelUrl"]')
+  if (!idInput || !nameInput || !modelInput) return
+
+  const markManual = (input) => {
+    input.dataset.autofill = '0'
+  }
+  const markAuto = (input) => {
+    input.dataset.autofill = '1'
+  }
+
+  if (!idInput.value.trim()) markAuto(idInput)
+  else markManual(idInput)
+  if (!nameInput.value.trim()) markAuto(nameInput)
+  else markManual(nameInput)
+
+  idInput.addEventListener('input', () => markManual(idInput))
+  nameInput.addEventListener('input', () => markManual(nameInput))
+
+  const applyFromModel = () => {
+    const derived = fieldsFromModelPath(modelInput.value)
+    if (!derived.id) return
+    if (idInput.dataset.autofill === '1') {
+      idInput.value = derived.id
+      markAuto(idInput)
+    }
+    if (nameInput.dataset.autofill === '1') {
+      nameInput.value = derived.name
+      markAuto(nameInput)
+    }
+  }
+
+  modelInput.addEventListener('change', applyFromModel)
+  modelInput.addEventListener('input', applyFromModel)
 }
 
 export class AssetRegistry {
@@ -220,10 +283,10 @@ class AuthoringController {
     new Dialog({
       title: asset ? `Edit Asset · ${asset.name}` : 'Register 3D Asset',
       content: `<form class="foundry-bridge-authoring fb-form">
-        <div class="form-group"><label>Asset ID</label><input name="id" value="${escape(value.id)}" placeholder="quaternius.goblin-01" /></div>
-        <div class="form-group"><label>Name</label><input name="name" value="${escape(value.name)}" placeholder="Goblin 01" /></div>
+        <div class="form-group"><label>Asset ID</label><input name="id" value="${escape(value.id)}" placeholder="auto from model filename" /><p class="notes">Filled from the model filename; edit anytime.</p></div>
+        <div class="form-group"><label>Name</label><input name="name" value="${escape(value.name)}" placeholder="auto from model filename" /></div>
         <div class="form-group"><label>Kind</label><select name="kind">${options(ASSET_KINDS, value.kind)}</select></div>
-        <div class="form-group stacked"><label>Model URL</label><div class="form-fields"><input name="modelUrl" value="${escape(value.modelUrl)}" placeholder="assets/models/goblin.glb" /><button type="button" class="file-picker" data-file-target="modelUrl" data-file-type="any" title="Browse Files"><i class="fas fa-file-import"></i></button></div><p class="notes">GLB/GLTF path or URL included in the client asset manifest.</p></div>
+        <div class="form-group stacked"><label>Model URL</label><div class="form-fields"><input name="modelUrl" value="${escape(value.modelUrl)}" placeholder="assets/models/goblin.glb" /><button type="button" class="file-picker" data-file-target="modelUrl" data-file-type="any" title="Browse Files"><i class="fas fa-file-import"></i></button></div><p class="notes">GLB/GLTF path or URL. Picking a file fills Asset ID and Name when those fields are still automatic.</p></div>
         <div class="form-group"><label>Preview image</label><div class="form-fields"><input name="previewUrl" value="${escape(value.previewUrl)}" placeholder="assets/previews/goblin.webp" /><button type="button" class="file-picker" data-file-target="previewUrl" data-file-type="image" title="Browse Files"><i class="fas fa-file-import"></i></button></div></div>
         <div class="form-group"><label>Entity type</label><select name="defaultEntityType">${options(ENTITY_TYPES, value.defaultEntityType)}</select></div>
         <fieldset><legend>Default scale</legend><div class="fb-vector"><label>X<input name="scaleX" type="number" step="0.01" value="${value.defaultScale.x}" /></label><label>Y<input name="scaleY" type="number" step="0.01" value="${value.defaultScale.y}" /></label><label>Z<input name="scaleZ" type="number" step="0.01" value="${value.defaultScale.z}" /></label></div></fieldset>
@@ -238,11 +301,13 @@ class AuthoringController {
           callback: async (html) => {
             const data = formData(html)
             try {
+              const modelUrl = String(data.get('modelUrl') || '').trim()
+              const derived = fieldsFromModelPath(modelUrl)
               const saved = await this.registry.upsert({
-                id: data.get('id'),
-                name: data.get('name'),
+                id: String(data.get('id') || '').trim() || derived.id,
+                name: String(data.get('name') || '').trim() || derived.name || derived.id,
                 kind: data.get('kind'),
-                modelUrl: data.get('modelUrl'),
+                modelUrl,
                 previewUrl: data.get('previewUrl'),
                 tags: splitList(data.get('tags')),
                 defaultEntityType: data.get('defaultEntityType'),
@@ -260,7 +325,10 @@ class AuthoringController {
         cancel: { label: 'Cancel' },
       },
       default: 'save',
-      render: (html) => bindFilePickers(html),
+      render: (html) => {
+        bindFilePickers(html)
+        bindAssetIdentityFromModel(html)
+      },
     }, { width: 620 }).render(true)
   }
 
@@ -421,50 +489,104 @@ class AuthoringController {
   }
 }
 
+/**
+ * Foundry v12: controls is an array; tools is an array; clicks use onClick.
+ * Foundry v13+: controls is a Record keyed by name (tokens/tiles); tools is a
+ * Record; clicks use onChange and each tool needs an order.
+ */
+function resolveControl(controls, ...names) {
+  if (Array.isArray(controls)) {
+    return controls.find((control) => names.includes(control.name)) || null
+  }
+  for (const name of names) {
+    if (controls?.[name]) return controls[name]
+  }
+  return null
+}
+
 function addTool(control, tool) {
-  if (Array.isArray(control.tools)) control.tools.push(tool)
-  else control.tools[tool.name] = tool
+  if (!control?.tools) return
+  const tools = control.tools
+  const order = Array.isArray(tools) ? tools.length : Object.keys(tools).length
+  const activate = typeof tool.onChange === 'function' ? tool.onChange : tool.onClick
+  const entry = {
+    name: tool.name,
+    title: tool.title,
+    icon: tool.icon,
+    button: true,
+    order: Number.isFinite(tool.order) ? tool.order : order,
+    visible: tool.visible ?? !!game.user?.isGM,
+  }
+  // v13 calls onChange and still forwards deprecated onClick — never set both.
+  if (Array.isArray(tools)) {
+    entry.onClick = activate
+    tools.push(entry)
+  } else {
+    entry.onChange = (_event, active) => {
+      if (active === false) return
+      activate?.()
+    }
+    tools[entry.name] = entry
+  }
 }
 
 export function installAuthoring(bridge, registry) {
   const authoring = new AuthoringController(bridge, registry)
+  window.foundryBridgeAuthoring = authoring
+
+  // Register during init/setup so the hook exists before SceneControls builds.
   Hooks.on('getSceneControlButtons', (controls) => {
-    const tokenControls = Array.isArray(controls) ? controls.find((control) => control.name === 'token') : controls.tokens
-    const tileControls = Array.isArray(controls) ? controls.find((control) => control.name === 'tiles') : controls.tiles
-    if (!tokenControls) return
+    const tokenControls = resolveControl(controls, 'tokens', 'token')
+    const tileControls = resolveControl(controls, 'tiles', 'tile')
+    if (!tokenControls) {
+      console.warn(`${MODULE_ID} | Token scene controls missing; Bridge toolbar tools were not added.`)
+      return
+    }
+
     addTool(tokenControls, {
       name: 'bridge-assets',
       title: 'Foundry Bridge: 3D Asset Registry',
-      icon: 'fas fa-cubes',
-      button: true,
-      onClick: () => authoring.openAssetRegistry(),
+      icon: 'fa-solid fa-cubes',
+      onChange: () => authoring.openAssetRegistry(),
     })
     addTool(tokenControls, {
       name: 'bridge-scene',
       title: 'Foundry Bridge: 3D Scene Settings',
-      icon: 'fas fa-mountain-sun',
-      button: true,
-      onClick: () => authoring.openSceneSettings(),
+      icon: 'fa-solid fa-mountain-sun',
+      onChange: () => authoring.openSceneSettings(),
     })
-    const entityTool = {
+    const openInspector = () => authoring.openEntityInspector()
+    addTool(tokenControls, {
       name: 'bridge-entity',
       title: 'Foundry Bridge: Selected Entity 3D Inspector',
-      icon: 'fas fa-cube',
-      button: true,
-      onClick: () => authoring.openEntityInspector(),
+      icon: 'fa-solid fa-cube',
+      onChange: openInspector,
+    })
+    if (tileControls) {
+      addTool(tileControls, {
+        name: 'bridge-entity',
+        title: 'Foundry Bridge: Selected Entity 3D Inspector',
+        icon: 'fa-solid fa-cube',
+        onChange: openInspector,
+      })
     }
-    addTool(tokenControls, entityTool)
-    if (tileControls) addTool(tileControls, { ...entityTool })
     addTool(tokenControls, {
       name: 'bridge-sync',
       title: 'Foundry Bridge: Reconnect and push 3D world',
-      icon: 'fas fa-plug',
-      button: true,
-      onClick: () => {
+      icon: 'fa-solid fa-plug',
+      onChange: () => {
         bridge.connect()
         setTimeout(() => bridge.pushSnapshot(), 400)
       },
     })
   })
-  window.foundryBridgeAuthoring = authoring
+}
+
+/** Rebuild left-rail SceneControls after tools are registered (safe no-op if already current). */
+export function refreshSceneControls() {
+  try {
+    ui.controls?.initialize?.()
+  } catch (error) {
+    console.warn(`${MODULE_ID} | Could not refresh SceneControls`, error)
+  }
 }

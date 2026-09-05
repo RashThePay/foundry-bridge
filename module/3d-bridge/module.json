@@ -1,15 +1,16 @@
 {
   "id": "3d-bridge",
   "title": "Foundry Bridge",
-  "description": "Makes Foundry an authoritative rules engine, world editor, and GM control plane for external game clients.",
-  "version": "0.3.0",
+  "description": "<p>Makes Foundry an authoritative rules engine, world editor, and GM control plane for external game clients.</p>",
+  "version": "0.3.1",
   "compatibility": {
     "minimum": "12",
     "verified": "13"
   },
   "authors": [
     {
-      "name": "Arash"
+      "name": "Arash",
+      "flags": {}
     }
   ],
   "esmodules": [
@@ -17,9 +18,11 @@
   ],
   "socket": true,
   "styles": [
-    "styles/bridge.css"
+    {
+      "src": "styles/bridge.css"
+    }
   ],
   "url": "https://github.com/RashThePay/foundry-bridge",
   "manifest": "",
-  "download": ""
+  "flags": {}
 }

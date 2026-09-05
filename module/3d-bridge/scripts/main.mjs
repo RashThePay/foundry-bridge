@@ -1,4 +1,4 @@
-import { AssetRegistry, installAuthoring } from './authoring.mjs'
+import { AssetRegistry, installAuthoring, refreshSceneControls } from './authoring.mjs'
 
 const MODULE_ID = '3d-bridge'
 const PROTOCOL_VERSION = 1
@@ -426,6 +426,8 @@ const bridge = new FoundryBridge(assetRegistry)
 
 Hooks.once('init', () => {
   assetRegistry.registerSetting()
+  // Toolbar hook must be registered before SceneControls initializes (during ready).
+  installAuthoring(bridge, assetRegistry)
   const reconnect = () => bridge.enabled && bridge.connect()
   game.settings.register(MODULE_ID, 'enabled', {
     name: 'Enable bridge',
@@ -467,7 +469,7 @@ Hooks.once('init', () => {
 Hooks.once('ready', () => {
   if (!game.user?.isGM) return
   bridge.connect()
-  installAuthoring(bridge, assetRegistry)
+  refreshSceneControls()
 
   Hooks.on('canvasReady', () => bridge.pushSnapshot())
   Hooks.on('createToken', (document) => bridge.onDocumentCreated(document))
