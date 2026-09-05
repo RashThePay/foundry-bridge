@@ -430,6 +430,7 @@ export function installAuthoring(bridge, registry) {
   const authoring = new AuthoringController(bridge, registry)
   Hooks.on('getSceneControlButtons', (controls) => {
     const tokenControls = Array.isArray(controls) ? controls.find((control) => control.name === 'token') : controls.tokens
+    const tileControls = Array.isArray(controls) ? controls.find((control) => control.name === 'tiles') : controls.tiles
     if (!tokenControls) return
     addTool(tokenControls, {
       name: 'bridge-assets',
@@ -445,13 +446,15 @@ export function installAuthoring(bridge, registry) {
       button: true,
       onClick: () => authoring.openSceneSettings(),
     })
-    addTool(tokenControls, {
+    const entityTool = {
       name: 'bridge-entity',
       title: 'Foundry Bridge: Selected Entity 3D Inspector',
       icon: 'fas fa-cube',
       button: true,
       onClick: () => authoring.openEntityInspector(),
-    })
+    }
+    addTool(tokenControls, entityTool)
+    if (tileControls) addTool(tileControls, { ...entityTool })
     addTool(tokenControls, {
       name: 'bridge-sync',
       title: 'Foundry Bridge: Reconnect and push 3D world',
