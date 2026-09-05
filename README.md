@@ -1,23 +1,24 @@
 # Foundry Bridge
 
 Foundry Bridge turns Foundry VTT into the authoritative rules engine, world
-editor, and GM control plane for an external game client.
+editor, and GM control plane for an external **2D LPC** game client.
 
 ```text
-External 2D/3D clients
+External 2D LPC clients
         ↕ WebSocket Protocol v1
 Room-aware gateway
         ↕
 Foundry module
-  ├─ scene/world state
+  ├─ scene/map state
   ├─ actor and token state
   ├─ rules and rolls
   └─ GM authoring/control
 ```
 
 Players do not need to open Foundry. The external client can be implemented in
-Godot, Three.js, Phaser, or another renderer because the bridge protocol does
-not expose renderer-specific paths or Foundry document operations.
+Phaser, Godot 2D, PixiJS, or another 2D renderer because the bridge protocol
+exposes LPC sprite IDs and map coordinates rather than Foundry document
+operations.
 
 ## Current foundation
 
@@ -27,15 +28,18 @@ not expose renderer-specific paths or Foundry document operations.
 - Foundry-authoritative command handling
 - Cached world snapshot for reconnecting clients
 - Revisioned incremental entity/actor/scene events
-- Renderer-neutral X/Y/Z transforms and logical prefab IDs
+- 2D X/Y map coordinates and logical LPC sprite IDs
 - Token movement, public chat, freeform player intents, and resync
 - Player and spectator roles
-- Persistent 3D asset registry with model/preview file picking
+- Persistent LPC sprite registry with sheet/preview file picking
 - Foundry toolbar authoring tools for Scene settings and selected entities
-- One-click prefab placement as a Foundry Tile proxy
+- One-click sprite placement as a Foundry Tile proxy
 - Temporary compatibility for the original spike messages
 
 The full contract is documented in [PROTOCOL.md](PROTOCOL.md).
+
+The Foundry module requires **Foundry VTT 14** (verified on 14.367) and does
+not load on v13 worlds.
 
 ## Local setup
 
@@ -89,53 +93,54 @@ The test client can:
 
 - receive the current scene and token snapshot
 - follow token and actor updates
-- move a token using world coordinates
+- move a token using 2D map coordinates
 - send public chat into Foundry
 - submit a freeform intent as a GM whisper
 - request an authoritative resync
 
-## 3D authoring in Foundry
+## 2D LPC authoring in Foundry
 
 Four tools are added to Foundry's Token controls:
 
-- **3D Asset Registry** registers GLB/GLTF models, previews, categories,
-  animation sets, colliders, tags, and default scales.
-- **3D Scene Settings** configures the environment prefab, world scale,
-  lighting, fog, skybox, and default camera.
-- **Selected Entity 3D Inspector** assigns a prefab and transform to the
+- **LPC Sprite Registry** registers sprite sheets, previews, LPC kinds,
+  frame size, 4/8 directions, animation names, tags, and default scale.
+- **LPC Scene Settings** configures the map sprite, tileset ID, world scale,
+  lighting tint, fog overlay, and camera mode (`follow`, `locked`, or
+  `top-down`).
+- **Selected Entity LPC Inspector** assigns a sprite, facing, and scale to the
   currently controlled Token or Tile, along with visibility, selection,
   freeform interaction, and external-controller bindings.
-- **Reconnect and push 3D world** sends a complete authoritative snapshot.
+- **Reconnect and push 2D world** sends a complete authoritative snapshot.
 
-The Asset Registry can also place a prefab directly in the active Scene. It
-creates a normal Foundry Tile as the editable 2D proxy while the external client
-renders its registered 3D model.
+The Sprite Registry can also place a sprite directly in the active Scene. It
+creates a normal Foundry Tile as the editable proxy while the external client
+renders the registered LPC sheet.
 
 ### Stored data
 
-The module reads renderer-neutral metadata from Foundry flags.
+The module reads 2D LPC metadata from Foundry flags.
 
 Scene:
 
 ```js
-await canvas.scene.setFlag('lpc-bridge', 'world3d', {
-  environmentId: 'quaternius.medieval-village',
-  worldUnitsPerGridSquare: 1,
+await canvas.scene.setFlag('lpc-bridge', 'world2d', {
+  mapId: 'lpc.medieval-village',
+  tilesetId: 'lpc.terrain-exterior',
+  unitsPerGridSquare: 1,
   lighting: { preset: 'sunset' },
   fog: { enabled: false },
-  camera: { preset: 'isometric' },
+  camera: { preset: 'follow' },
 })
 ```
 
 Token or Tile document:
 
 ```js
-await document.setFlag('lpc-bridge', 'entity3d', {
-  prefabId: 'quaternius.goblin-01',
+await document.setFlag('lpc-bridge', 'entity2d', {
+  spriteId: 'lpc.goblin-01',
   entityType: 'actor',
-  rotation: { x: 0, y: 180, z: 0 },
-  scale: { x: 1, y: 1, z: 1 },
-  heightOffset: 0,
+  facing: 'down',
+  scale: { x: 1, y: 1 },
   selectable: true,
   interaction: { freeform: true },
   controllers: [],
@@ -143,8 +148,11 @@ await document.setFlag('lpc-bridge', 'entity3d', {
 ```
 
 These examples expose the same persisted data model written by the authoring
-UI. Clients receive the asset registry once per world snapshot and entities
-refer to assets through stable logical IDs.
+UI. Clients receive the sprite registry once per world snapshot and entities
+refer to sheets through stable logical IDs.
+
+Older 3D flags (`world3d` / `entity3d`) are still read as a fallback until the
+GM saves the 2D authoring forms.
 
 ## Development
 
@@ -154,17 +162,18 @@ npm test
 
 Gateway tests cover room isolation, request/response correlation, cached
 snapshot replay, and access-key rejection. The Foundry module must additionally
-be exercised in Foundry v12/v13 because it depends on the live Foundry runtime.
+be exercised in Foundry v14 because it depends on the live Foundry runtime. The
+module is verified against Foundry 14.367.
 
 ## Next product layer
 
-The next implementation area is a real external 3D editor/runtime client:
+The next implementation area is a real external 2D LPC client:
 
-- load the Scene environment and registered GLB assets
-- render and live-update Token/Tile entities
-- camera and object selection
+- load the Scene map/tileset and registered LPC sheets
+- render and live-update Token/Tile entities with directional animations
+- follow/locked camera and object selection
 - live preview/open-scene commands from Foundry
-- transform feedback from the 3D client when useful
+- movement and facing feedback from the 2D client when useful
 - persistent player identity and actor-control bindings
 
 That layer will write the flags already represented by Protocol v1 rather than

@@ -69,7 +69,7 @@ function normalizeLegacy(message, connection) {
   const payload = { ...message }
   delete payload.type
   if (message.type === 'move' && !payload.destination) {
-    payload.destination = { x: Number(payload.x), y: 0, z: Number(payload.y) }
+    payload.destination = { x: Number(payload.x), y: Number(payload.y) }
   }
   return envelope(
     connection?.role === 'foundry' ? 'event' : 'command',

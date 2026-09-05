@@ -1,11 +1,11 @@
 {
   "id": "lpc-bridge",
   "title": "Foundry Bridge",
-  "description": "Makes Foundry an authoritative rules engine, world editor, and GM control plane for external game clients.",
-  "version": "0.3.0",
+  "description": "Makes Foundry an authoritative rules engine, world editor, and GM control plane for an external 2D LPC game client.",
+  "version": "0.5.0",
   "compatibility": {
-    "minimum": "12",
-    "verified": "13"
+    "minimum": "14",
+    "verified": "14.367"
   },
   "authors": [
     {

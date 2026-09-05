@@ -1,8 +1,8 @@
 # Foundry Bridge Protocol v1
 
-This document defines the renderer-neutral contract between an external game
-client, the WebSocket gateway, and the Foundry module. Foundry is the
-authoritative rules and world editor. External clients render and present that
+This document defines the 2D LPC contract between an external game client, the
+WebSocket gateway, and the Foundry module. Foundry is the authoritative rules
+and world editor. External clients render an orthogonal 2D LPC view of that
 world; they do not mutate Foundry documents directly.
 
 ## Envelope
@@ -74,13 +74,14 @@ Initial command set:
 | Type | Payload |
 |---|---|
 | `world.getSnapshot` | `{}` |
-| `token.move` | `{ tokenId, destination: { x, y, z } }` |
+| `token.move` | `{ tokenId, destination: { x, y } }` |
 | `chat.send` | `{ text }` |
 | `intent.submit` | `{ targetEntityId?, verb?, text }` |
 | `connection.ping` | `{ sentAt? }` |
 
-Coordinates are renderer-neutral world units. The X/Z plane is horizontal and
-Y is height. By default one Foundry grid square equals one world unit.
+Coordinates are 2D map units. X increases to the right and Y increases
+downward, matching Foundry's canvas. By default one Foundry grid square equals
+one world unit. LPC clients should treat these as map coordinates, not pixels.
 
 Example success:
 
@@ -127,27 +128,28 @@ reconnecting client can render immediately while requesting a fresh copy.
     "scene": {
       "id": "scene-id",
       "name": "Temple Yard",
-      "dimensions": { "width": 40, "depth": 30, "gridSize": 100 },
-      "environment": {
-        "environmentId": "quaternius.fantasy-temple",
-        "skyboxId": null,
+      "dimensions": { "width": 40, "height": 30, "gridSize": 100 },
+      "map": {
+        "mapId": "lpc.fantasy-temple",
+        "tilesetId": "lpc.terrain-interior",
         "lighting": {},
         "fog": {},
-        "camera": {},
-        "worldUnitsPerGridSquare": 1
+        "camera": { "preset": "follow" },
+        "unitsPerGridSquare": 1
       }
     },
     "assets": [
       {
-        "id": "quaternius.goblin-01",
+        "id": "lpc.goblin-01",
         "name": "Goblin 01",
         "kind": "creature",
-        "modelUrl": "assets/models/goblin.glb",
-        "previewUrl": "assets/previews/goblin.webp",
+        "spriteUrl": "assets/sprites/goblin.png",
+        "previewUrl": "assets/previews/goblin.png",
         "defaultEntityType": "actor",
-        "defaultScale": { "x": 1, "y": 1, "z": 1 },
-        "animationSetId": "quaternius.humanoid",
-        "collider": { "type": "capsule" },
+        "frameSize": { "width": 64, "height": 64 },
+        "directions": 4,
+        "animations": ["idle", "walk", "slash", "hurt"],
+        "defaultScale": { "x": 1, "y": 1 },
         "tags": ["goblin", "humanoid"]
       }
     ],
@@ -156,7 +158,7 @@ reconnecting client can render immediately while requesting a fresh copy.
 }
 ```
 
-An entity has a stable Foundry document identity and renderer-neutral metadata:
+An entity has a stable Foundry document identity and 2D LPC metadata:
 
 ```json
 {
@@ -165,11 +167,11 @@ An entity has a stable Foundry document identity and renderer-neutral metadata:
   "documentId": "token-id",
   "entityType": "actor",
   "name": "Goblin",
-  "prefabId": "quaternius.goblin-01",
+  "spriteId": "lpc.goblin-01",
   "transform": {
-    "position": { "x": 4, "y": 0, "z": 7 },
-    "rotation": { "x": 0, "y": 180, "z": 0 },
-    "scale": { "x": 1, "y": 1, "z": 1 }
+    "position": { "x": 4, "y": 7 },
+    "facing": "down",
+    "scale": { "x": 1, "y": 1 }
   },
   "visible": true,
   "selectable": true,
@@ -178,15 +180,23 @@ An entity has a stable Foundry document identity and renderer-neutral metadata:
 }
 ```
 
-Foundry stores 3D authoring metadata in document flags under `lpc-bridge`:
+`facing` is one of `down`, `left`, `right`, or `up`. Clients use it to select
+the matching LPC directional row. `directions: 8` assets may additionally
+interpret diagonal movement locally; the authored facing remains cardinal.
 
-- Scene: `flags.lpc-bridge.world3d`
-- Token/Tile: `flags.lpc-bridge.entity3d`
+Foundry stores 2D authoring metadata in document flags under `lpc-bridge`:
 
-Raw GLTF paths, shader uniforms, and engine-specific material configuration do
-not belong in Foundry scene data. Foundry stores logical `prefabId` values; the
-client resolves them through the snapshot's asset registry. Model URLs live in
-that registry rather than being repeated on each Scene entity.
+- Scene: `flags.lpc-bridge.world2d`
+- Token/Tile: `flags.lpc-bridge.entity2d`
+
+Raw engine paths, shader uniforms, and renderer-specific material configuration
+do not belong in Foundry scene data. Foundry stores logical `spriteId` values;
+the client resolves them through the snapshot's asset registry. Sprite sheet
+URLs live in that registry rather than being repeated on each Scene entity.
+
+LPC character sheets are typically 64×64 frames. Tilesets are typically 32×32.
+The registry records `frameSize` and `animations` so the client can slice sheets
+without a second asset catalog.
 
 ## Incremental events
 
@@ -218,3 +228,7 @@ revision gap, it must send `world.getSnapshot` and replace local state.
 The spike protocol (`hello`, `state`, `move`, `chat`, `intent`,
 `request-state`) remains accepted temporarily. New code must emit v1 envelopes.
 Compatibility can be removed after the first real client migrates.
+
+Older 3D authoring flags (`world3d`, `entity3d`, `prefabId`, `modelUrl`) are
+read as a one-way fallback and rewritten as 2D flags when the GM saves from the
+authoring UI.

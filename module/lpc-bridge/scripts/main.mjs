@@ -3,26 +3,58 @@ import { AssetRegistry, installAuthoring } from './authoring.mjs'
 const MODULE_ID = 'lpc-bridge'
 const PROTOCOL_VERSION = 1
 
-const DEFAULT_WORLD_3D = Object.freeze({
-  environmentId: null,
-  skyboxId: null,
-  worldUnitsPerGridSquare: 1,
+const FACINGS = ['down', 'left', 'right', 'up']
+
+const DEFAULT_WORLD_2D = Object.freeze({
+  mapId: null,
+  tilesetId: null,
+  unitsPerGridSquare: 1,
   lighting: {},
   fog: {},
   camera: {},
 })
 
-const DEFAULT_ENTITY_3D = Object.freeze({
-  prefabId: null,
+const DEFAULT_ENTITY_2D = Object.freeze({
+  spriteId: null,
   entityType: null,
   visible: true,
   selectable: true,
-  rotation: { x: 0, y: 0, z: 0 },
-  scale: { x: 1, y: 1, z: 1 },
-  heightOffset: 0,
+  facing: 'down',
+  scale: { x: 1, y: 1 },
   interaction: {},
   controllers: [],
 })
+
+function migrateWorld2d(stored) {
+  if (!stored) return {}
+  const preset = stored.camera?.preset === 'isometric' ? 'top-down' : stored.camera?.preset
+  return {
+    mapId: stored.environmentId ?? stored.mapId ?? null,
+    tilesetId: stored.tilesetId ?? null,
+    unitsPerGridSquare: stored.unitsPerGridSquare ?? stored.worldUnitsPerGridSquare ?? 1,
+    lighting: {
+      preset: stored.lighting?.preset,
+      ambient: stored.lighting?.ambient,
+      color: stored.lighting?.color,
+    },
+    fog: stored.fog,
+    camera: { preset: preset || 'follow' },
+  }
+}
+
+function migrateEntity2d(stored) {
+  if (!stored) return {}
+  return {
+    spriteId: stored.spriteId ?? stored.prefabId ?? null,
+    entityType: stored.entityType,
+    visible: stored.visible,
+    selectable: stored.selectable,
+    facing: FACINGS.includes(stored.facing) ? stored.facing : 'down',
+    scale: { x: stored.scale?.x ?? 1, y: stored.scale?.y ?? 1 },
+    interaction: stored.interaction,
+    controllers: stored.controllers,
+  }
+}
 
 function envelope(kind, type, payload = {}, extra = {}) {
   return { v: PROTOCOL_VERSION, kind, type, ...extra, payload }
@@ -185,12 +217,14 @@ class FoundryBridge {
     return canvas?.scene || game.scenes?.active || null
   }
 
-  world3d(scene) {
-    return mergeDefaults(DEFAULT_WORLD_3D, scene?.getFlag(MODULE_ID, 'world3d'))
+  world2d(scene) {
+    const stored = scene?.getFlag(MODULE_ID, 'world2d') || scene?.getFlag(MODULE_ID, 'world3d')
+    return mergeDefaults(DEFAULT_WORLD_2D, migrateWorld2d(stored))
   }
 
-  entity3d(document) {
-    return mergeDefaults(DEFAULT_ENTITY_3D, document?.getFlag(MODULE_ID, 'entity3d'))
+  entity2d(document) {
+    const stored = document?.getFlag(MODULE_ID, 'entity2d') || document?.getFlag(MODULE_ID, 'entity3d')
+    return mergeDefaults(DEFAULT_ENTITY_2D, migrateEntity2d(stored))
   }
 
   gridSize(scene) {
@@ -198,30 +232,29 @@ class FoundryBridge {
   }
 
   worldUnits(scene) {
-    return Number(this.world3d(scene).worldUnitsPerGridSquare) || 1
+    return Number(this.world2d(scene).unitsPerGridSquare) || 1
   }
 
-  canvasToWorld(scene, x, y, elevation = 0, heightOffset = 0) {
+  canvasToWorld(scene, x, y) {
     const factor = this.worldUnits(scene) / this.gridSize(scene)
     return {
       x: Number(x || 0) * factor,
-      y: Number(elevation || 0) + Number(heightOffset || 0),
-      z: Number(y || 0) * factor,
+      y: Number(y || 0) * factor,
     }
   }
 
   worldToCanvas(scene, position) {
     const factor = this.gridSize(scene) / this.worldUnits(scene)
+    const y = Number.isFinite(Number(position.y)) ? Number(position.y) : Number(position.z)
     return {
       x: Number(position.x) * factor,
-      y: Number(position.z) * factor,
-      elevation: Number(position.y || 0),
+      y: y * factor,
     }
   }
 
   tokenEntity(document) {
     const scene = document.parent
-    const config = this.entity3d(document)
+    const config = this.entity2d(document)
     const actor = document.actor
     const hp = actor?.system?.attributes?.hp
     return {
@@ -230,10 +263,10 @@ class FoundryBridge {
       documentId: document.id,
       entityType: config.entityType || (actor ? 'actor' : 'token'),
       name: document.name,
-      prefabId: config.prefabId,
+      spriteId: config.spriteId,
       transform: {
-        position: this.canvasToWorld(scene, document.x, document.y, document.elevation, config.heightOffset),
-        rotation: config.rotation,
+        position: this.canvasToWorld(scene, document.x, document.y),
+        facing: config.facing,
         scale: config.scale,
       },
       visible: config.visible !== false && !document.hidden,
@@ -250,18 +283,18 @@ class FoundryBridge {
 
   tileEntity(document) {
     const scene = document.parent
-    const config = this.entity3d(document)
-    if (!config.prefabId) return null
+    const config = this.entity2d(document)
+    if (!config.spriteId) return null
     return {
       id: `Tile.${document.id}`,
       documentType: 'Tile',
       documentId: document.id,
       entityType: config.entityType || 'prop',
       name: document.texture?.src?.split('/').pop() || 'World object',
-      prefabId: config.prefabId,
+      spriteId: config.spriteId,
       transform: {
-        position: this.canvasToWorld(scene, document.x, document.y, document.elevation, config.heightOffset),
-        rotation: config.rotation,
+        position: this.canvasToWorld(scene, document.x, document.y),
+        facing: config.facing,
         scale: config.scale,
       },
       visible: config.visible !== false && !document.hidden,
@@ -278,7 +311,7 @@ class FoundryBridge {
 
   snapshot() {
     const scene = this.activeScene()
-    const environment = this.world3d(scene)
+    const map = this.world2d(scene)
     const entities = scene
       ? [
           ...scene.tokens.map((document) => this.tokenEntity(document)),
@@ -300,10 +333,10 @@ class FoundryBridge {
         active: !!scene.active,
         dimensions: {
           width: scene.width / this.gridSize(scene) * this.worldUnits(scene),
-          depth: scene.height / this.gridSize(scene) * this.worldUnits(scene),
+          height: scene.height / this.gridSize(scene) * this.worldUnits(scene),
           gridSize: this.gridSize(scene),
         },
-        environment,
+        map,
       } : null,
       entities,
       assets: this.assetRegistry.snapshot(),
@@ -315,15 +348,17 @@ class FoundryBridge {
   }
 
   canControl(document, source) {
-    const controllers = this.entity3d(document).controllers || []
+    const controllers = this.entity2d(document).controllers || []
     if (!controllers.length) return true
     return controllers.includes(source?.connectionId) || controllers.includes(source?.name)
   }
 
   async handleTokenMove(command) {
     const { tokenId, destination } = command.payload || {}
-    if (!tokenId || !destination || ![destination.x, destination.z].every(Number.isFinite)) {
-      this.reject(command, 'INVALID_ARGUMENT', 'tokenId and finite destination.x/destination.z are required.')
+    const x = Number(destination?.x)
+    const y = Number.isFinite(Number(destination?.y)) ? Number(destination.y) : Number(destination?.z)
+    if (!tokenId || !destination || ![x, y].every(Number.isFinite)) {
+      this.reject(command, 'INVALID_ARGUMENT', 'tokenId and finite destination.x/destination.y are required.')
       return
     }
     const scene = this.activeScene()
@@ -336,9 +371,9 @@ class FoundryBridge {
       this.reject(command, 'PERMISSION_DENIED', 'This client may not control that token.')
       return
     }
-    const position = this.worldToCanvas(scene, destination)
-    await document.update(position)
-    this.respond(command, { tokenId, destination })
+    const resolved = { x, y }
+    await document.update(this.worldToCanvas(scene, resolved))
+    this.respond(command, { tokenId, destination: resolved })
   }
 
   async handleChat(command) {
@@ -351,7 +386,7 @@ class FoundryBridge {
     const created = await ChatMessage.create({
       content: foundry.utils.escapeHTML(text),
       speaker: { alias: `[Bridge] ${speaker}` },
-      type: CONST.CHAT_MESSAGE_STYLES?.OTHER ?? CONST.CHAT_MESSAGE_TYPES?.OTHER ?? 0,
+      style: CONST.CHAT_MESSAGE_STYLES.OTHER,
       flags: { [MODULE_ID]: { fromClient: true, connectionId: command.source?.connectionId } },
     })
     this.respond(command, { messageId: created?.id || null })
@@ -370,6 +405,7 @@ class FoundryBridge {
     const created = await ChatMessage.create({
       content: `<div class="lpc-intent"><strong>${player}</strong> wants to <em>${verb}</em> <strong>${target}</strong>: ${foundry.utils.escapeHTML(text)}</div>`,
       speaker: { alias: 'Player Intent' },
+      style: CONST.CHAT_MESSAGE_STYLES.OTHER,
       whisper: ChatMessage.getWhisperRecipients('GM').map((user) => user.id),
       flags: { [MODULE_ID]: { fromClient: true, intent: true, payload: clone(payload) } },
     })
@@ -411,7 +447,7 @@ class FoundryBridge {
     container.innerHTML = message.content || ''
     const text = (container.textContent || '').replace(/\s+/g, ' ').trim()
     if (!text) return
-    const speaker = message.speaker?.alias || game.users?.get(message.author?.id || message.user)?.name || 'Foundry'
+    const speaker = message.speaker?.alias || message.author?.name || game.users?.get(message.author)?.name || 'Foundry'
     this.send(envelope('event', 'chat.message', {
       messageId: message.id,
       speaker,

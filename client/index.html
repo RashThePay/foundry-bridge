@@ -104,7 +104,7 @@
   <body>
     <header>
       <h1>LPC Bridge test client</h1>
-      <p class="sub">Bidirectional: player actions → Foundry, DM changes → this client live.</p>
+      <p class="sub">Bidirectional 2D LPC: player actions → Foundry, DM changes → this client live.</p>
     </header>
 
     <section class="panel">
@@ -261,7 +261,7 @@
             id: entity.documentId,
             name: entity.name,
             x: entity.transform?.position?.x ?? 0,
-            y: entity.transform?.position?.z ?? 0,
+            y: entity.transform?.position?.y ?? 0,
             hp: entity.actor?.hp ?? null,
             maxHp: entity.actor?.maxHp ?? null,
           }))
@@ -275,7 +275,7 @@
           id: entity.documentId,
           name: entity.name,
           x: entity.transform?.position?.x ?? 0,
-          y: entity.transform?.position?.z ?? 0,
+          y: entity.transform?.position?.y ?? 0,
           hp: entity.actor?.hp ?? null,
           maxHp: entity.actor?.maxHp ?? null,
         }
@@ -349,13 +349,11 @@
       }
       $('moveBtn').onclick = () => {
         const tokenId = $('tokenSelect').value || undefined
-        const token = tokens.find((t) => t.id === tokenId)
         sendCommand('token.move', {
           tokenId,
           destination: {
             x: Number($('moveX').value),
-            y: 0,
-            z: Number($('moveY').value),
+            y: Number($('moveY').value),
           },
         })
       }

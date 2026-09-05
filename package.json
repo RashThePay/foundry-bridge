@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Spike: external LPC player client ↔ Foundry DM panel via WebSocket bridge",
+  "description": "Spike: external 2D LPC player client ↔ Foundry DM panel via WebSocket bridge",
   "scripts": {
     "bridge": "node bridge/server.mjs",
     "client": "node bridge/static-server.mjs",

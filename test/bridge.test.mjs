@@ -67,7 +67,7 @@ test('routes a command to Foundry and returns its correlated response', async (t
     kind: 'command',
     type: 'token.move',
     id: 'move-1',
-    payload: { tokenId: 'token-a', destination: { x: 2, y: 0, z: 4 } },
+    payload: { tokenId: 'token-a', destination: { x: 2, y: 4 } },
   }))
   const command = await nextMessage(foundry, (message) => message.id === 'move-1')
   assert.equal(command.source.name, 'Arash')
