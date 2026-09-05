@@ -1,3 +1,5 @@
+import { AssetRegistry, installAuthoring } from './authoring.mjs'
+
 const MODULE_ID = 'lpc-bridge'
 const PROTOCOL_VERSION = 1
 
@@ -42,7 +44,8 @@ function mergeDefaults(defaults, value) {
 }
 
 class FoundryBridge {
-  constructor() {
+  constructor(assetRegistry) {
+    this.assetRegistry = assetRegistry
     this.ws = null
     this.reconnectTimer = null
     this.manualClose = false
@@ -303,6 +306,7 @@ class FoundryBridge {
         environment,
       } : null,
       entities,
+      assets: this.assetRegistry.snapshot(),
     }
   }
 
@@ -417,9 +421,11 @@ class FoundryBridge {
   }
 }
 
-const bridge = new FoundryBridge()
+const assetRegistry = new AssetRegistry()
+const bridge = new FoundryBridge(assetRegistry)
 
 Hooks.once('init', () => {
+  assetRegistry.registerSetting()
   const reconnect = () => bridge.enabled && bridge.connect()
   game.settings.register(MODULE_ID, 'enabled', {
     name: 'Enable bridge',
@@ -461,6 +467,7 @@ Hooks.once('init', () => {
 Hooks.once('ready', () => {
   if (!game.user?.isGM) return
   bridge.connect()
+  installAuthoring(bridge, assetRegistry)
 
   Hooks.on('canvasReady', () => bridge.pushSnapshot())
   Hooks.on('createToken', (document) => bridge.onDocumentCreated(document))
@@ -475,22 +482,6 @@ Hooks.once('ready', () => {
   })
   Hooks.on('createChatMessage', (message) => bridge.forwardFoundryChat(message))
 
-  Hooks.on('getSceneControlButtons', (controls) => {
-    const tokenControls = Array.isArray(controls) ? controls.find((control) => control.name === 'token') : controls.tokens
-    if (!tokenControls) return
-    const tool = {
-      name: 'lpc-bridge',
-      title: 'Foundry Bridge: reconnect and push snapshot',
-      icon: 'fas fa-plug',
-      button: true,
-      onClick: () => {
-        bridge.connect()
-        setTimeout(() => bridge.pushSnapshot(), 400)
-      },
-    }
-    if (Array.isArray(tokenControls.tools)) tokenControls.tools.push(tool)
-    else tokenControls.tools[tool.name] = tool
-  })
 })
 
 window.foundryBridge = bridge
