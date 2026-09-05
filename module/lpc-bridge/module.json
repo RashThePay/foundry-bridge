@@ -1,8 +1,8 @@
 {
   "id": "lpc-bridge",
-  "title": "LPC Bridge (spike)",
-  "description": "Connects Foundry to an external player WebSocket bridge for chat, token moves, and intents.",
-  "version": "0.1.0",
+  "title": "Foundry Bridge",
+  "description": "Makes Foundry an authoritative rules engine, world editor, and GM control plane for external game clients.",
+  "version": "0.2.0",
   "compatibility": {
     "minimum": "12",
     "verified": "13"
@@ -19,7 +19,7 @@
   "styles": [
     "styles/bridge.css"
   ],
-  "url": "https://github.com/local/foundry-bridge",
+  "url": "https://github.com/RashThePay/foundry-bridge",
   "manifest": "",
   "download": ""
 }
